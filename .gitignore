@@ -1,0 +1,32 @@
+﻿
+# Private credentials
+.secret_key
+.env
+.env.*
+*.pem
+*.key
+secrets.json
+credentials.json
+
+# Private databases
+mellowtech
+*.db
+*.sqlite
+*.sqlite3
+
+# Python temporary files
+__pycache__/
+*.pyc
+
+# Windows installers
+*.exe
+*.msi
+
+# Logs
+*.log
+
+# Virtual environments
+venv/
+.venv/
+env/
+

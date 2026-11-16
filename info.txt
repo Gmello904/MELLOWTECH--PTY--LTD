@@ -1,0 +1,319 @@
+
+==================== DATABASE TABLES (structure only) ====================
+CREATE TABLE security_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL, event_type TEXT NOT NULL,
+            device TEXT NOT NULL, severity TEXT NOT NULL, status TEXT NOT NULL,
+            description TEXT, timestamp TEXT NOT NULL, org_id INTEGER, source_ip TEXT, device_id INTEGER)
+
+CREATE TABLE sqlite_sequence(name,seq)
+
+CREATE TABLE system_telemetry (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, hostname TEXT, operating_system TEXT, processor TEXT,
+            cpu_usage REAL, memory_usage REAL, disk_usage REAL, timestamp TEXT NOT NULL)
+
+CREATE TABLE users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE COLLATE NOCASE, name TEXT NOT NULL,
+            password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('admin','viewer')),
+            active INTEGER NOT NULL DEFAULT 1, failed_attempts INTEGER NOT NULL DEFAULT 0, locked_until TEXT,
+            session_version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, last_login TEXT, org_id INTEGER, email_verified INTEGER NOT NULL DEFAULT 1, approval TEXT NOT NULL DEFAULT 'approved', decided_at TEXT, decided_by INTEGER, decision_note TEXT, staff_level TEXT)
+
+CREATE TABLE password_resets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL, purpose TEXT NOT NULL DEFAULT 'reset')
+
+CREATE TABLE audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, user_id INTEGER,
+            action TEXT NOT NULL, detail TEXT, ip TEXT)
+
+CREATE TABLE devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, name TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE, os TEXT, ip TEXT, cpu REAL, memory REAL, disk REAL,
+            agent_version TEXT, enrolled_at TEXT NOT NULL, last_seen TEXT, posture TEXT)
+
+CREATE TABLE enroll_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, key_hash TEXT NOT NULL UNIQUE,
+            created_by INTEGER, expires_at TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0)
+
+CREATE TABLE blocks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, ip TEXT NOT NULL, reason TEXT,
+            created_by INTEGER, created_at TEXT NOT NULL, expires_at TEXT,
+            status TEXT NOT NULL DEFAULT 'active', event_id INTEGER)
+
+CREATE TABLE commands (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, device_id INTEGER NOT NULL, block_id INTEGER,
+            action TEXT NOT NULL, ip TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+            result TEXT, created_at TEXT NOT NULL, done_at TEXT, param TEXT)
+
+CREATE TABLE organisations (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, is_platform INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, plan TEXT NOT NULL DEFAULT 'free', plan_expires TEXT, suspended INTEGER NOT NULL DEFAULT 0, suspended_reason TEXT)
+
+CREATE TABLE payments (id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, user_id INTEGER NOT NULL, plan TEXT NOT NULL, amount TEXT NOT NULL, currency TEXT NOT NULL, order_id TEXT NOT NULL UNIQUE, capture_id TEXT, status TEXT NOT NULL DEFAULT 'created', created_at TEXT NOT NULL, paid_at TEXT)
+
+CREATE TABLE payfast_payments (id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, user_id INTEGER NOT NULL, plan TEXT NOT NULL, amount TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'created', created_at TEXT NOT NULL, paid_at TEXT)
+
+CREATE TABLE user_sessions (id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL, sid TEXT NOT NULL UNIQUE, created_at TEXT NOT NULL, last_seen TEXT NOT NULL, ip TEXT, agent TEXT, revoked INTEGER NOT NULL DEFAULT 0)
+
+CREATE TABLE assistant_usage (org_id INTEGER NOT NULL, day TEXT NOT NULL, count INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (org_id, day))
+
+CREATE TABLE platform_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL)
+
+CREATE TABLE help_messages (id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, user_id INTEGER NOT NULL, topic TEXT NOT NULL, message TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', created_at TEXT NOT NULL)
+
+CREATE TABLE org_settings (org_id INTEGER PRIMARY KEY, idle_minutes INTEGER, allowed_ips TEXT NOT NULL DEFAULT '', alert_high INTEGER NOT NULL DEFAULT 1, alert_email TEXT NOT NULL DEFAULT '', contact_email TEXT NOT NULL DEFAULT '', phone TEXT NOT NULL DEFAULT '', industry TEXT NOT NULL DEFAULT '', company_size TEXT NOT NULL DEFAULT '')
+
+CREATE TABLE scan_domains (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, domain TEXT NOT NULL,
+            verify_token TEXT NOT NULL, verified INTEGER NOT NULL DEFAULT 0, verified_at TEXT,
+            created_by INTEGER, created_at TEXT NOT NULL,
+            UNIQUE (org_id, domain))
+
+CREATE TABLE scan_results (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, domain_id INTEGER NOT NULL,
+            started_at TEXT NOT NULL, finished_at TEXT, score INTEGER, findings TEXT)
+
+CREATE TABLE service_checks (id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, user_id INTEGER NOT NULL, service TEXT NOT NULL, score INTEGER NOT NULL, created_at TEXT NOT NULL)
+
+CREATE TABLE service_requests (id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, user_id INTEGER NOT NULL, service TEXT NOT NULL, note TEXT, urgent INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'new', created_at TEXT NOT NULL)
+
+CREATE TABLE document_scans (id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, user_id INTEGER NOT NULL, file_name TEXT NOT NULL, doc_type TEXT NOT NULL, sha256 TEXT NOT NULL, score INTEGER NOT NULL, verdict TEXT NOT NULL, created_at TEXT NOT NULL)
+
+CREATE TABLE autopilot_settings (org_id INTEGER NOT NULL, rule TEXT NOT NULL, enabled INTEGER NOT NULL, PRIMARY KEY (org_id, rule))
+
+CREATE TABLE autopilot_log (id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, ts TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL)
+
+CREATE TABLE autopilot_state (org_id INTEGER PRIMARY KEY, last_run TEXT NOT NULL)
+
+
+==================== ROUTES (names only) ====================
+421: @app.get("/")
+426: @app.get("/<path:name>")
+462: @app.post("/api/auth/login")
+510: @app.post("/api/auth/logout")
+519: @app.get("/api/auth/me")
+534: @app.post("/api/auth/forgot")
+558: @app.post("/api/auth/reset")
+607: @app.post("/api/auth/register")
+639: @app.post("/api/auth/verify")
+663: @app.get("/api/auth/providers")
+682: @app.get("/auth/<provider>/start")
+696: @app.get("/auth/<provider>/callback")
+822: @app.get("/api/billing")
+839: @app.post("/api/paypal/create-order")
+868: @app.post("/api/paypal/capture-order")
+906: @app.get("/api/status")
+911: @app.get("/api/events")
+921: @app.post("/api/events")
+968: @app.get("/api/system")
+983: @app.get("/api/network")
+1001: @app.get("/api/telemetry")
+1009: @app.get("/api/database")
+1066: @app.get("/api/devices")
+1088: @app.post("/api/devices/<int:device_id>/command")
+1121: @app.post("/api/devices/enroll-key")
+1132: @app.post("/api/devices/<int:device_id>/remove")
+1146: @app.post("/api/alerts/<int:row_key>/status")
+1162: @app.get("/api/blocks")
+1178: @app.post("/api/blocks")
+1217: @app.post("/api/blocks/<int:block_id>/remove")
+1237: @app.post("/api/agent/enroll")
+1260: @app.post("/api/agent/heartbeat")
+1313: @app.post("/api/agent/ack")
+1328: @app.get("/download/mellowtech_agent.py")
+1333: @app.get("/download/MellowTechAgent.exe")
+1341: @app.get("/api/requests")
+1385: @app.get("/api/requests/setting")
+1391: @app.post("/api/requests/setting")
+1407: @app.post("/api/requests/<int:user_id>/approve")
+1413: @app.post("/api/requests/<int:user_id>/reject")
+1469: @app.get("/api/internal/permissions")
+1475: @app.post("/api/support/message")
+1497: @app.get("/api/internal/support")
+1507: @app.post("/api/internal/support/<int:message_id>")
+1520: @app.get("/api/internal/payments")
+1527: @app.post("/api/internal/payments/<service>")
+1542: @app.get("/api/internal/customers")
+1553: @app.get("/api/internal/employees")
+1562: @app.post("/api/internal/employees/<int:user_id>/level")
+1585: @app.get("/api/internal/audit")
+1599: @app.get("/api/internal/overview")
+1668: @app.get("/api/internal/customers/<int:org_id>")
+1698: @app.post("/api/internal/customers/<int:org_id>/suspend")
+1718: @app.post("/api/internal/customers/<int:org_id>/signout")
+1731: @app.post("/api/internal/customers/<int:org_id>/plan")
+1755: @app.post("/api/internal/customers/<int:org_id>/users/<int:user_id>/active")
+1825: @app.get("/api/settings")
+1847: @app.post("/api/settings/profile")
+1867: @app.post("/api/settings/policy")
+1895: @app.post("/api/settings/alerts")
+1908: @app.post("/api/settings/signout-others")
+1925: @app.get("/api/team")
+1934: @app.post("/api/team/invite")
+1964: @app.post("/api/team/<int:user_id>/role")
+1987: @app.post("/api/team/<int:user_id>/active")
+2011: @app.post("/api/internal/customers/<int:org_id>/policy-reset")
+2134: @app.get("/api/features")
+2145: @app.get("/api/locked-log")
+2314: @app.get("/api/assistant/status")
+2323: @app.post("/api/assistant/ask")
+
+==================== SIGN-IN CODE ====================
+def login():
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email", "")).strip().lower()[:254]
+    password = str(data.get("password", ""))[:256]
+    ip = request.remote_addr or "?"
+    if too_many("login-ip:" + ip, 30, 300) or too_many("login-user:" + email, 10, 300):
+        return error("Too many attempts. Wait a few minutes and try again.", 429)
+
+    db = get_db()
+    user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    locked = bool(user and user["locked_until"] and datetime.fromisoformat(user["locked_until"]) > utcnow())
+    valid = check_password_hash(user["password_hash"] if user else DUMMY_HASH, password)
+
+    if not (user and user["active"] and valid and not locked):
+        if user and not locked:
+            fails = user["failed_attempts"] + 1
+            until = iso(utcnow() + timedelta(minutes=LOCK_MINUTES)) if fails >= MAX_FAILED_LOGINS else None
+            db.execute("UPDATE users SET failed_attempts=?, locked_until=? WHERE id=?",
+                       (0 if until else fails, until, user["id"]))
+            db.commit()
+        audit("login_failed", email)
+        return error("Invalid email or password.", 401)
+
+    if not user["email_verified"]:
+        return error("Please confirm your email first. Open the link we sent you.", 403)
+    if user["approval"] != "approved":
+        return error(APPROVAL_MESSAGES.get(user["approval"], APPROVAL_MESSAGES["pending"]), 403)
+    company = db.execute("SELECT suspended, is_platform FROM organisations WHERE id = ?", (user["org_id"],)).fetchone()
+    if company and company["suspended"] and not company["is_platform"]:
+        audit("login_blocked_suspended", email, user["id"])
+        return error("This account has been suspended. Please contact MellowTech support.", 403)
+    if company and not company["is_platform"]:
+        allowed = allowed_ip_list(get_org_settings(user["org_id"]))
+        if allowed and ip not in allowed:
+            audit("login_blocked_address", f"{email} from {ip}", user["id"])
+            return error("Sign-in is not allowed from this address. Ask your company administrator.", 403)
+    db.execute("UPDATE users SET failed_attempts=0, locked_until=NULL, last_login=? WHERE id=?",
+               (iso(utcnow()), user["id"]))
+    db.commit()
+    session.clear()
+    session.permanent = True
+    session.update(uid=user["id"], sv=user["session_version"], csrf=secrets.token_urlsafe(24))
+    account.new_session(user["id"])
+    audit("login", email, user["id"])
+    return jsonify({"ok": True})
+
+
+@app.post("/api/auth/logout")
+@login_required()
+def logout():
+    audit("logout", g.user["email"], g.user["id"])
+    account.end_session()
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/auth/me")
+@login_required()
+def me():
+    user = g.user
+    org = get_db().execute("SELECT plan, plan_expires FROM organisations WHERE id = ?", (user["org_id"],)).fetchone()
+    plan, expires = org["plan"], org["plan_expires"]
+    if plan != "free" and expires and expires < iso(utcnow()):
+        plan = "free"        # paid time has run out
+    return jsonify({"user": {"email": user["email"], "name": user["name"], "role": user["role"],
+                             "org": user["org_name"], "is_platform": bool(user["is_platform"]),
+                             "staff_level": user["staff_level"] if user["is_platform"] else None,
+                             "plan": plan, "plan_expires": expires},
+                    "csrf": session["csrf"]})
+
+
+@app.post("/api/auth/forgot")
+def forgot():
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email", "")).strip().lower()[:254]
+    if too_many("forgot-ip:" + (request.remote_addr or "?"), 5, 900) or too_many("forgot-user:" + email, 3, 900):
+        return error("Too many requests. Try again later.", 429)
+
+    db = get_db()
+    user = db.execute("SELECT id, email, name, active FROM users WHERE email = ?", (email,)).fetchone()
+    if user and user["active"]:
+        token = secrets.token_urlsafe(32)
+        db.execute("DELETE FROM password_resets WHERE user_id = ? AND purpose = 'reset'", (user["id"],))
+        db.execute("INSERT INTO password_resets (user_id, token_hash, expires_at) VALUES (?,?,?)",
+                   (user["id"], sha(token), iso(utcnow() + timedelta(minutes=RESET_MINUTES))))
+        db.commit()
+        audit("reset_requested", email, user["id"])
+        send_email(user["email"], "Reset your MellowTech password",
+                   f"Hello {user['name']},\n\nUse this link to choose a new password "
+                   f"(valid for {RESET_MINUTES} minutes, one use):\n{BASE_URL}/reset.html?token={token}\n\n"
+
+==================== /api/auth/me CODE ====================
+
+
+@app.get("/api/auth/me")
+@login_required()
+def me():
+    user = g.user
+    org = get_db().execute("SELECT plan, plan_expires FROM organisations WHERE id = ?", (user["org_id"],)).fetchone()
+    plan, expires = org["plan"], org["plan_expires"]
+    if plan != "free" and expires and expires < iso(utcnow()):
+        plan = "free"        # paid time has run out
+    return jsonify({"user": {"email": user["email"], "name": user["name"], "role": user["role"],
+                             "org": user["org_name"], "is_platform": bool(user["is_platform"]),
+                             "staff_level": user["staff_level"] if user["is_platform"] else None,
+                             "plan": plan, "plan_expires": expires},
+                    "csrf": session["csrf"]})
+
+
+@app.post("/api/auth/forgot")
+def forgot():
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email", "")).strip().lower()[:254]
+    if too_many("forgot-ip:" + (request.remote_addr or "?"), 5, 900) or too_many("forgot-user:" + email, 3, 900):
+        return error("Too many requests. Try again later.", 429)
+
+    db = get_db()
+    user = db.execute("SELECT id, email, name, active FROM users WHERE email = ?", (email,)).fetchone()
+    if user and user["active"]:
+        token = secrets.token_urlsafe(32)
+        db.execute("DELETE FROM password_resets WHERE user_id = ? AND purpose = 'reset'", (user["id"],))
+        db.execute("INSERT INTO password_resets (user_id, token_hash, expires_at) VALUES (?,?,?)",
+                   (user["id"], sha(token), iso(utcnow() + timedelta(minutes=RESET_MINUTES))))
+        db.commit()
+
+==================== app.js sign-out handling ====================
+        });
+        if (response.status === 401) {
+            window.location.href = "/login.html";   // not signed in, or the session ended
+            throw new Error("Not signed in");
+        }
+        if (!response.ok) throw new Error(path + " HTTP " + response.status);
+--
+        if (response.status === 401) {
+            window.location.href = "/login.html";   // not signed in, or the session ended
+            throw new Error("Not signed in");
+        }
+        if (!response.ok) throw new Error(path + " HTTP " + response.status);
+        return await response.json();
+--
+    }
+    window.location.href = "/login.html";
+}
+
+/* -------------------- ACCOUNT REQUESTS (MellowTech administrators) -------------------- */
+
+--
+    });
+    if (response.status === 401) {
+        window.location.href = "/login.html";
+        throw new Error("Not signed in");
+    }
+    const data = await response.json().catch(() => ({}));
+--
+    if (response.status === 401) {
+        window.location.href = "/login.html";
+        throw new Error("Not signed in");
+    }
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || "Request failed (" + response.status + ")");
+--

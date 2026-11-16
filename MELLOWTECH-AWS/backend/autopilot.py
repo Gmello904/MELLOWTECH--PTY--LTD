@@ -1,0 +1,216 @@
+"""MellowTech Autopilot: fixes problems on its own, with safeguards, and records everything it did.
+
+It runs whenever a laptop agent checks in. It can only use actions the laptop agents already support:
+block an attacking address, update virus definitions, run a virus scan, isolate a laptop and block USB storage.
+It cannot change anything outside the connected laptops (for example a company's cloud account).
+"""
+import json
+from datetime import datetime, timedelta
+
+from flask import g, jsonify, request
+
+RULES = [
+    {"key": "block_attackers", "label": "Block attacking addresses", "default": True, "risky": False,
+     "description": "When your laptops report a serious attack from an outside address, block that address on every laptop for 24 hours."},
+    {"key": "update_protection", "label": "Keep virus definitions up to date", "default": True, "risky": False,
+     "description": "If a laptop's virus definitions are 3 days old or more, update them."},
+    {"key": "scan_stale", "label": "Run a virus scan when one is overdue", "default": True, "risky": False,
+     "description": "If a laptop has not had a quick scan for 7 days, scan it."},
+    {"key": "isolate_threats", "label": "Isolate a laptop with an active threat", "default": False, "risky": True,
+     "description": "If the antivirus reports an active threat, cut that laptop off the network for 60 minutes so the infection cannot spread. It is released automatically."},
+    {"key": "block_usb", "label": "Block USB storage on laptops", "default": False, "risky": True,
+     "description": "Turn off USB drives on every laptop that allows them. Keyboards and mice keep working."},
+]
+RULE_KEYS = {r["key"]: r for r in RULES}
+
+MAX_AUTO_BLOCKS_PER_HOUR = 5
+RUN_EVERY_SECONDS = 20
+_deps = {}
+_last_run = {}
+
+
+def ensure_tables(db):
+    db.execute("CREATE TABLE IF NOT EXISTS autopilot_settings (org_id INTEGER NOT NULL, rule TEXT NOT NULL, "
+               "enabled INTEGER NOT NULL, PRIMARY KEY (org_id, rule))")
+    db.execute("CREATE TABLE IF NOT EXISTS autopilot_log (id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, "
+               "ts TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS autopilot_state (org_id INTEGER PRIMARY KEY, last_run TEXT NOT NULL)")
+
+
+def is_on(db, org_id, rule):
+    row = db.execute("SELECT enabled FROM autopilot_settings WHERE org_id = ? AND rule = ?", (org_id, rule)).fetchone()
+    return bool(row["enabled"]) if row else RULE_KEYS[rule]["default"]
+
+
+def note(db, org_id, action, detail):
+    db.execute("INSERT INTO autopilot_log (org_id, ts, action, detail) VALUES (?,?,?,?)",
+               (org_id, _deps["iso"](_deps["utcnow"]()), action, detail[:300]))
+    print(f"Autopilot: {action}: {detail}", flush=True)
+
+
+def queue(db, org_id, device_id, action, param=None):
+    db.execute("INSERT INTO commands (org_id,device_id,block_id,action,ip,param,status,created_at) "
+               "VALUES (?,?,NULL,?,'',?,'pending',?)", (org_id, device_id, action, param, _deps["iso"](_deps["utcnow"]())))
+
+
+def done_recently(db, device_id, action, hours):
+    since = _deps["iso"](_deps["utcnow"]() - timedelta(hours=hours))
+    return db.execute("SELECT 1 FROM commands WHERE device_id = ? AND action = ? AND created_at >= ? "
+                      "AND status != 'cancelled' LIMIT 1", (device_id, action, since)).fetchone() is not None
+
+
+def block_attackers(db, org_id):
+    since = (datetime.now() - timedelta(hours=24)).isoformat()      # events store local time without a zone
+    rows = db.execute("SELECT id, source_ip, severity FROM security_events WHERE org_id = ? AND status = 'New' "
+                      "AND source_ip IS NOT NULL AND source_ip != '' AND timestamp >= ? ORDER BY id",
+                      (org_id, since)).fetchall()
+    by_ip = {}
+    for row in rows:
+        entry = by_ip.setdefault(row["source_ip"], {"first": row["id"], "high": 0, "medium": 0})
+        if row["severity"] == "High":
+            entry["high"] += 1
+        elif row["severity"] == "Medium":
+            entry["medium"] += 1
+
+    hour_ago = _deps["iso"](_deps["utcnow"]() - timedelta(hours=1))
+    made = db.execute("SELECT COUNT(*) FROM autopilot_log WHERE org_id = ? AND action = 'Blocked an attacker' AND ts >= ?",
+                      (org_id, hour_ago)).fetchone()[0]
+    for ip, entry in by_ip.items():
+        if entry["high"] < 1 and entry["medium"] < 3:
+            continue
+        if made >= MAX_AUTO_BLOCKS_PER_HOUR:
+            break
+        if db.execute("SELECT 1 FROM blocks WHERE org_id = ? AND ip = ? AND status = 'active'", (org_id, ip)).fetchone():
+            continue
+        if _deps["block_problem"](ip, org_id):          # never block our own server, our laptops or private addresses
+            continue
+        now = _deps["utcnow"]()
+        cursor = db.execute("INSERT INTO blocks (org_id,ip,reason,created_by,created_at,expires_at,event_id) VALUES (?,?,?,?,?,?,?)",
+                            (org_id, ip, "Autopilot: repeated or serious attack", None, _deps["iso"](now),
+                             _deps["iso"](now + timedelta(hours=24)), entry["first"]))
+        count = _deps["queue_commands"](org_id, cursor.lastrowid, ip, "block")
+        db.execute("UPDATE security_events SET status = 'Blocked' WHERE org_id = ? AND source_ip = ? AND status = 'New'",
+                   (org_id, ip))
+        alerts = entry["high"] + entry["medium"]
+        note(db, org_id, "Blocked an attacker",
+             f"{ip} was blocked on {count} laptop(s) for 24 hours after {alerts} alert(s). Undo it on the Threat Detection page.")
+        made += 1
+
+
+def check_device(db, org_id, device_id):
+    row = db.execute("SELECT name, posture FROM devices WHERE id = ? AND org_id = ?", (device_id, org_id)).fetchone()
+    if not row or not row["posture"]:
+        return
+    try:
+        posture = json.loads(row["posture"])
+    except ValueError:
+        return
+    if not isinstance(posture, dict) or posture.get("platform"):
+        return
+    name, defender = row["name"], posture.get("defender") or {}
+    working = defender.get("state") == "on"
+
+    age = defender.get("definitions_age_days")
+    if (is_on(db, org_id, "update_protection") and working and age is not None and age >= 3
+            and not done_recently(db, device_id, "update_protection", 6)):
+        queue(db, org_id, device_id, "update_protection")
+        note(db, org_id, "Updated protection", f"{name}: virus definitions were {age} day(s) old, so an update was started.")
+
+    scan_age = defender.get("quick_scan_age_days")
+    if (is_on(db, org_id, "scan_stale") and working and (scan_age is None or scan_age >= 7)
+            and not done_recently(db, device_id, "scan", 24)):
+        queue(db, org_id, device_id, "scan")
+        note(db, org_id, "Started a virus scan",
+             f"{name}: no recent scan" + ("" if scan_age is None else f" ({scan_age} days)") + ", so a quick scan was started.")
+
+    if (is_on(db, org_id, "isolate_threats") and (defender.get("threats_active") or 0) > 0 and not posture.get("isolated")
+            and not done_recently(db, device_id, "isolate", 6)):
+        queue(db, org_id, device_id, "isolate", "60")
+        note(db, org_id, "Isolated a laptop",
+             f"{name} has an active threat, so it was cut off the network for 60 minutes. It is released automatically.")
+
+    if (is_on(db, org_id, "block_usb") and posture.get("usb_storage") == "allowed"
+            and not done_recently(db, device_id, "usb_block", 24)):
+        queue(db, org_id, device_id, "usb_block")
+        note(db, org_id, "Blocked USB storage", f"{name} allowed USB drives, so USB storage was blocked.")
+
+
+def run(db, org_id, device_id):
+    """Called every time a laptop agent checks in. Never raises, so a problem here cannot break the agent."""
+    try:
+        if not _deps or not _deps["feature_allowed"](org_id, "autopilot"):
+            return
+        now = datetime.now().timestamp()
+        if now - _last_run.get(org_id, 0) < RUN_EVERY_SECONDS:
+            return
+        _last_run[org_id] = now
+        ensure_tables(db)
+        db.execute("INSERT INTO autopilot_state (org_id, last_run) VALUES (?,?) "
+                   "ON CONFLICT(org_id) DO UPDATE SET last_run = excluded.last_run",
+                   (org_id, _deps["iso"](_deps["utcnow"]())))
+        if is_on(db, org_id, "block_attackers"):
+            block_attackers(db, org_id)
+        for row in db.execute("SELECT id FROM devices WHERE org_id = ?", (org_id,)).fetchall():
+            check_device(db, org_id, row["id"])
+        db.commit()
+    except Exception as exc:
+        print(f"Autopilot problem (agent not affected): {exc}", flush=True)
+
+
+def init_autopilot(app, deps):
+    _deps.update(deps)
+    get_db, error, iso, utcnow = deps["get_db"], deps["error"], deps["iso"], deps["utcnow"]
+    login_required, audit, locked, feature_allowed = deps["login_required"], deps["audit"], deps["locked"], deps["feature_allowed"]
+
+    @app.get("/api/autopilot")
+    @login_required()
+    def autopilot_status():
+        db = get_db()
+        ensure_tables(db)
+        org_id = g.user["org_id"]
+        log = db.execute("SELECT ts, action, detail FROM autopilot_log WHERE org_id = ? ORDER BY id DESC LIMIT 40",
+                         (org_id,)).fetchall()
+        state = db.execute("SELECT last_run FROM autopilot_state WHERE org_id = ?", (org_id,)).fetchone()
+        day_ago = iso(utcnow() - timedelta(hours=24))
+        actions = db.execute("SELECT COUNT(*) FROM autopilot_log WHERE org_id = ? AND ts >= ?", (org_id, day_ago)).fetchone()[0]
+        online = db.execute("SELECT COUNT(*) FROM devices WHERE org_id = ? AND last_seen >= ?",
+                            (org_id, iso(utcnow() - timedelta(seconds=60)))).fetchone()[0]
+        total = db.execute("SELECT COUNT(*) FROM devices WHERE org_id = ?", (org_id,)).fetchone()[0]
+        return jsonify({"allowed": feature_allowed(org_id, "autopilot"),
+                        "last_run": state["last_run"] if state else None, "actions_24h": actions,
+                        "laptops_online": online, "laptops_total": total,
+                        "rules": [{"key": r["key"], "label": r["label"], "description": r["description"],
+                                   "risky": r["risky"], "enabled": is_on(db, org_id, r["key"])} for r in RULES],
+                        "log": [dict(r) for r in log]})
+
+    @app.post("/api/autopilot/rule")
+    @login_required("admin")
+    def autopilot_rule():
+        data = request.get_json(silent=True) or {}
+        key = data.get("key")
+        if key not in RULE_KEYS or not isinstance(data.get("enabled"), bool):
+            return error("Unknown setting.", 400)
+        denied = locked("autopilot")
+        if denied:
+            return denied
+        db = get_db()
+        ensure_tables(db)
+        db.execute("INSERT INTO autopilot_settings (org_id, rule, enabled) VALUES (?,?,?) "
+                   "ON CONFLICT(org_id, rule) DO UPDATE SET enabled = excluded.enabled",
+                   (g.user["org_id"], key, 1 if data["enabled"] else 0))
+        db.commit()
+        audit("autopilot_setting", f"{key} {'on' if data['enabled'] else 'off'}")
+        return jsonify({"ok": True})
+
+    @app.get("/api/autopilot/all")
+    @login_required("platform_admin")
+    def autopilot_all():
+        db = get_db()
+        ensure_tables(db)
+        rows = db.execute("SELECT l.ts, l.action, l.detail, o.name AS company FROM autopilot_log l "
+                          "JOIN organisations o ON o.id = l.org_id ORDER BY l.id DESC LIMIT 100").fetchall()
+        active = db.execute("SELECT COUNT(*) FROM autopilot_state WHERE last_run >= ?",
+                            (iso(utcnow() - timedelta(minutes=5)),)).fetchone()[0]
+        actions = db.execute("SELECT COUNT(*) FROM autopilot_log WHERE ts >= ?",
+                             (iso(utcnow() - timedelta(hours=24)),)).fetchone()[0]
+        return jsonify({"companies_active": active, "actions_24h": actions, "log": [dict(r) for r in rows]})

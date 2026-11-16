@@ -1,0 +1,85 @@
+﻿                });
+            }).catch(function (problem) {
+                say(problem.message, "err");
+            });
+        }
+
+        document.addEventListener("DOMContentLoaded", function () {
+            api("/api/auth/me").then(function (data) {
+                me = data.user;
+                csrf = data.csrf;
+                showPlan();
+            }).catch(function () {
+                $("plan-badge").textContent = "Plan: ?";
+            });
+
+
+            $("plan-badge").addEventListener("click", function () {
+                var button = document.querySelector('.nav-button[data-page="billing"]');
+                if (button) { button.click(); }
+            });
+
+            var navButton = document.querySelector('.nav-button[data-page="billing"]');
+            if (navButton) {
+                navButton.addEventListener("click", function () {
+                    if (me) { openBilling(); }
+                    else { setTimeout(openBilling, 800); }
+                });
+            }
+        });
+    })();
+    </script>
+
+    <!-- Dashboard threat overview (reads the data app.js already loads) -->
+    <script>
+    (function () {
+        var host = document.querySelector("#dashboard .stats-grid");
+        if (!host) return;
+
+        var box = document.createElement("div");
+        box.className = "ov-grid";
+        box.innerHTML =
+            '<div class="ov-card"><h3>Threat level</h3><div class="ov-level" id="ov-level">...</div>' +
+            '<p class="ov-sub" id="ov-sub"></p><div class="ov-scale" id="ov-scale"><i></i><i></i><i></i><i></i></div>' +
+            '<div class="ov-scale-names"><span>Secure</span><span>Elevated</span><span>High</span><span>Critical</span></div></div>' +
+            '<div class="ov-card"><h3>Open alerts by severity</h3><div class="ov-donut"><svg viewBox="0 0 120 120" id="ov-svg"></svg>' +
+            '<div><div class="ov-total" id="ov-total">0</div><div class="ov-legend">' +
+            '<span><i style="background:#c62f3b"></i>High <b id="ov-h">0</b></span>' +
+            '<span><i style="background:#f5a524"></i>Medium <b id="ov-m">0</b></span>' +
+            '<span><i style="background:#12906e"></i>Low <b id="ov-l">0</b></span></div></div></div></div>' +
+            '<div class="ov-card"><h3>Events, last 7 days</h3><div class="ov-trend" id="ov-trend"></div></div>';
+        host.after(box);
+
+        var C = 2 * Math.PI * 46;
+        var OPEN = ["New", "Investigating", "Blocked", "Open", "Monitoring"];
+        var LEVELS = [
+            { name: "Secure", color: "#12906e", note: "No open alerts. All quiet." },
+            { name: "Elevated", color: "#f5a524", note: "Some alerts need a look." },
+            { name: "High", color: "#e8590c", note: "A high severity alert is open." },
+            { name: "Critical", color: "#c62f3b", note: "Several high severity alerts. Act now." }
+        ];
+
+        function draw() {
+            var ev = (typeof lastEvents !== "undefined" && Array.isArray(lastEvents)) ? lastEvents : [];
+            var open = ev.filter(function (e) { return OPEN.indexOf(e.status) !== -1; });
+            var n = { high: 0, medium: 0, low: 0 };
+            open.forEach(function (e) {
+                var s = String(e.severity).toLowerCase();
+                if (n[s] !== undefined) n[s]++;
+            });
+
+-----API-----
+1615: function api(path, body) {
+2107: function api(path, body) {
+2180: api("/api/scanner/domains").then(renderDomains).catch(function (err) { say(err.message, "err"); });
+2190: var task = action === "vs-verify" ? api("/api/scanner/domains/" + id + "/verify", {})
+2191: : action === "vs-scan" ? api("/api/scanner/domains/" + id + "/scan", {})
+2192: : action === "vs-remove" && window.confirm("Remove this domain and its scan history?") ? api("/api/scanner/domains/" + id + "/remove", {})
+2210: api("/api/scanner/domains", { domain: domain }).then(function () {
+2268: function api(path, body) {
+2440: function api(path, body) {
+2665: function api(path, body) {
+2793: function api(path, body) {
+2915: function api(path, body) {
+2985: function api(path, body) {
+3441: function api(path, body) {

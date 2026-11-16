@@ -1,0 +1,1430 @@
+"""MellowTech Security Platform: backend and web server.
+
+Start:        python app.py            then open http://127.0.0.1:5000/
+Add a user:   python app.py create-user admin     (or: viewer)
+"""
+import base64, getpass, hashlib, ipaddress, json, os, platform, secrets, smtplib, socket, sqlite3, sys, time
+import urllib.parse, urllib.request
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from email.message import EmailMessage
+from functools import wraps
+from pathlib import Path
+
+import psutil
+from flask import Flask, abort, g, jsonify, redirect, request, send_from_directory, session
+from werkzeug.exceptions import HTTPException
+from werkzeug.middleware.proxy_fix import ProxyFix
+from werkzeug.security import check_password_hash, generate_password_hash
+
+import scanner
+import payfast
+import docscan
+import autopilot
+import services
+
+HERE = Path(__file__).resolve().parent
+
+
+def _load_settings_file():
+    """Optional backend/settings.env with lines like KEY=value. Real environment variables always win."""
+    file = HERE / "settings.env"
+    if not file.is_file():
+        return
+    for line in file.read_text(encoding="utf-8-sig").splitlines():
+        line = line.strip()
+        if line and not line.startswith("#") and "=" in line:
+            key, value = line.split("=", 1)
+            os.environ.setdefault(key.strip(), value.strip().strip('"').strip("'"))
+
+
+_load_settings_file()
+ROOT = HERE if (HERE / "index.html").exists() else HERE.parent      # folder with index.html
+DATABASE = os.environ.get("MELLOWTECH_DB", str(HERE / "mellowtech.db"))
+BASE_URL = os.environ.get("MELLOWTECH_BASE_URL", "http://127.0.0.1:5000").rstrip("/")
+HOST = os.environ.get("MELLOWTECH_HOST", "0.0.0.0")      # 0.0.0.0 lets other computers on your network connect; use 127.0.0.1 for this computer only
+PORT = int(os.environ.get("MELLOWTECH_PORT", "5000"))
+DEBUG = os.environ.get("MELLOWTECH_DEBUG") == "1"
+VERSION = "2026.10.15-protection"      # the page and app.js must carry the same version
+BEHIND_PROXY = os.environ.get("MELLOWTECH_BEHIND_PROXY") == "1"      # live behind Caddy or Nginx
+
+MAX_FAILED_LOGINS, LOCK_MINUTES, RESET_MINUTES = 5, 15, 30
+TELEMETRY_EVERY_SECONDS, TELEMETRY_KEEP_ROWS = 60, 5000
+VERIFY_HOURS = 24
+REQUIRE_APPROVAL = os.environ.get("MELLOWTECH_REQUIRE_APPROVAL", "1") != "0"     # new sign-ups wait for a MellowTech admin
+APPROVAL_MESSAGES = {
+    "pending": "Your account is waiting for approval. We will email you as soon as it is ready.",
+    "rejected": "Your account request was not approved. Please contact MellowTech.",
+}
+ONLINE_SECONDS, AGENT_INTERVAL = 60, 15
+DEVICE_ACTIONS = ("scan", "update_protection", "isolate", "release", "usb_block", "usb_allow")
+ALERT_STATUSES = ("New", "Investigating", "Blocked", "Resolved", "False positive", "Open", "Monitoring")
+PUBLIC_PAGES = {"login.html", "reset.html", "register.html", "style.css", "app.js",
+                "privacy.html", "terms.html", "cookies.html", "consent.js"}
+COMMON_PASSWORDS = {"password123", "password1234", "mellowtech123", "mellowtech1234", "qwerty12345",
+                    "1234567890", "12345678910", "admin12345", "letmein1234", "welcome1234"}
+
+
+def _env(name, default=""):
+    return os.environ.get(name, default)
+
+
+OAUTH = {   # keys come from the Google / GitHub developer consoles; URLs can be overridden for testing
+    "google": {"id": _env("GOOGLE_CLIENT_ID"), "secret": _env("GOOGLE_CLIENT_SECRET"), "scope": "openid email profile",
+               "auth": _env("MELLOWTECH_GOOGLE_AUTH_URL", "https://accounts.google.com/o/oauth2/v2/auth"),
+               "token": _env("MELLOWTECH_GOOGLE_TOKEN_URL", "https://oauth2.googleapis.com/token"),
+               "userinfo": _env("MELLOWTECH_GOOGLE_USERINFO_URL", "https://openidconnect.googleapis.com/v1/userinfo")},
+    "github": {"id": _env("GITHUB_OAUTH_CLIENT_ID"), "secret": _env("GITHUB_OAUTH_CLIENT_SECRET"), "scope": "read:user user:email",
+               "auth": _env("MELLOWTECH_GITHUB_AUTH_URL", "https://github.com/login/oauth/authorize"),
+               "token": _env("MELLOWTECH_GITHUB_TOKEN_URL", "https://github.com/login/oauth/access_token"),
+               "userinfo": _env("MELLOWTECH_GITHUB_USERINFO_URL", "https://api.github.com/user"),
+               "emails": _env("MELLOWTECH_GITHUB_EMAILS_URL", "https://api.github.com/user/emails")},
+}
+
+PAYPAL_CLIENT_ID = _env("PAYPAL_CLIENT_ID")
+PAYPAL_SECRET = _env("PAYPAL_SECRET")
+PAYPAL_CURRENCY = _env("PAYPAL_CURRENCY", "USD")
+PAYPAL_API = ("https://api-m.paypal.com" if _env("PAYPAL_MODE", "sandbox") == "live"
+              else "https://api-m.sandbox.paypal.com")
+PLANS = {
+    "starter":  {"name": "Starter Protection",  "price": "29.00", "days": 30, "setup_fee": "29.00"},
+    "business": {"name": "Business Protection", "price": "89.00", "days": 30, "setup_fee": "59.00"},
+    "enterprise": {"name": "Premium Enterprise Protection", "price": "499.00", "days": 30},
+}
+
+
+def load_secret_key():
+    key = os.environ.get("MELLOWTECH_SECRET_KEY")
+    if key:
+        return key
+    file = HERE / ".secret_key"          # created once; never share or commit this file
+    if not file.exists():
+        file.write_text(secrets.token_hex(32))
+    return file.read_text().strip()
+
+
+def hash_password(password):
+    """Hash with scrypt; fall back to PBKDF2 on Python builds that lack scrypt."""
+    try:
+        return generate_password_hash(password)
+    except (AttributeError, ValueError):
+        return generate_password_hash(password, method="pbkdf2:sha256")
+
+
+app = Flask(__name__, static_folder=None)
+if BEHIND_PROXY:        # trust the real visitor address that Caddy / Nginx passes on (needed for rate limits and logs)
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+app.config.update(
+    SECRET_KEY=load_secret_key(),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=BASE_URL.startswith("https://"),
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=8),
+    MAX_CONTENT_LENGTH=8 * 1024 * 1024,      # normal requests are held to 16 KB in api_guard; document scans may be larger
+)
+DUMMY_HASH = hash_password("not-a-real-password")
+psutil.cpu_percent(interval=None)        # prime so later calls do not block
+
+
+# ---------------------------------------------------------------- helpers
+def utcnow():
+    return datetime.now(timezone.utc)
+
+
+def iso(moment):
+    return moment.isoformat(timespec="seconds")
+
+
+def error(message, status):
+    return jsonify({"error": message}), status
+
+
+def sha(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+_hits = {}
+
+
+def too_many(key, limit, window):
+    """Simple in-memory rate limit (use Redis when running several servers)."""
+    now = time.time()
+    hits = [h for h in _hits.get(key, []) if now - h < window] + [now]
+    _hits[key] = hits
+    return len(hits) > limit
+
+
+def get_db():
+    if "db" not in g:
+        g.db = sqlite3.connect(DATABASE, timeout=10)
+        g.db.row_factory = sqlite3.Row
+    return g.db
+
+
+@app.teardown_appcontext
+def close_db(_exc):
+    db = g.pop("db", None)
+    if db is not None:
+        db.close()
+
+
+def audit(action, detail="", user_id=None):
+    db = get_db()
+    db.execute("INSERT INTO audit_log (ts, user_id, action, detail, ip) VALUES (?,?,?,?,?)",
+               (iso(utcnow()), user_id or session.get("uid"), action, detail[:300], request.remote_addr))
+    db.commit()
+
+
+def initialize_database():
+    db = sqlite3.connect(DATABASE)
+    db.executescript("""
+        CREATE TABLE IF NOT EXISTS security_events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL, event_type TEXT NOT NULL,
+            device TEXT NOT NULL, severity TEXT NOT NULL, status TEXT NOT NULL,
+            description TEXT, timestamp TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS system_telemetry (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, hostname TEXT, operating_system TEXT, processor TEXT,
+            cpu_usage REAL, memory_usage REAL, disk_usage REAL, timestamp TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS users (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, email TEXT NOT NULL UNIQUE COLLATE NOCASE, name TEXT NOT NULL,
+            password_hash TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('admin','viewer')),
+            active INTEGER NOT NULL DEFAULT 1, failed_attempts INTEGER NOT NULL DEFAULT 0, locked_until TEXT,
+            session_version INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL, last_login TEXT);
+        CREATE TABLE IF NOT EXISTS password_resets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE, expires_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS audit_log (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT NOT NULL, user_id INTEGER,
+            action TEXT NOT NULL, detail TEXT, ip TEXT);
+        CREATE TABLE IF NOT EXISTS devices (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, name TEXT NOT NULL,
+            token_hash TEXT NOT NULL UNIQUE, os TEXT, ip TEXT, cpu REAL, memory REAL, disk REAL,
+            agent_version TEXT, enrolled_at TEXT NOT NULL, last_seen TEXT);
+        CREATE TABLE IF NOT EXISTS enroll_keys (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, key_hash TEXT NOT NULL UNIQUE,
+            created_by INTEGER, expires_at TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0);
+        CREATE TABLE IF NOT EXISTS blocks (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, ip TEXT NOT NULL, reason TEXT,
+            created_by INTEGER, created_at TEXT NOT NULL, expires_at TEXT,
+            status TEXT NOT NULL DEFAULT 'active', event_id INTEGER);
+        CREATE TABLE IF NOT EXISTS commands (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, device_id INTEGER NOT NULL, block_id INTEGER,
+            action TEXT NOT NULL, ip TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'pending',
+            result TEXT, created_at TEXT NOT NULL, done_at TEXT);
+    """)
+    if db.execute("SELECT COUNT(*) FROM security_events").fetchone()[0] == 0:
+        stamp = datetime.now().isoformat()
+        db.executemany(
+            "INSERT INTO security_events (event_id,event_type,device,severity,status,description,timestamp) VALUES (?,?,?,?,?,?,?)",
+            [("EVT-001", "Login Activity", "Admin-PC", "Low", "Resolved", "Normal login activity recorded.", stamp),
+             ("EVT-002", "Network Activity", "Router-01", "Medium", "Monitoring", "Network activity is being monitored.", stamp),
+             ("EVT-003", "Security Check", "Server-01", "Low", "Resolved", "Routine security check completed.", stamp)])
+    db.execute("CREATE TABLE IF NOT EXISTS organisations (id INTEGER PRIMARY KEY AUTOINCREMENT, "
+               "name TEXT NOT NULL, is_platform INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL)")
+    db.execute("CREATE TABLE IF NOT EXISTS payments (id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, "
+               "user_id INTEGER NOT NULL, plan TEXT NOT NULL, amount TEXT NOT NULL, currency TEXT NOT NULL, "
+               "order_id TEXT NOT NULL UNIQUE, capture_id TEXT, status TEXT NOT NULL DEFAULT 'created', "
+               "created_at TEXT NOT NULL, paid_at TEXT)")
+    db.execute("CREATE TABLE IF NOT EXISTS payfast_payments (id INTEGER PRIMARY KEY AUTOINCREMENT, org_id INTEGER NOT NULL, "
+               "user_id INTEGER NOT NULL, plan TEXT NOT NULL, amount TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'created', "
+               "created_at TEXT NOT NULL, paid_at TEXT)")
+    for table, column, ddl in (("users", "org_id", "INTEGER"),
+                               ("users", "email_verified", "INTEGER NOT NULL DEFAULT 1"),
+                               ("users", "approval", "TEXT NOT NULL DEFAULT 'approved'"),
+                               ("users", "decided_at", "TEXT"),
+                               ("users", "decided_by", "INTEGER"),
+                               ("users", "decision_note", "TEXT"),
+                               ("security_events", "org_id", "INTEGER"),
+                               ("security_events", "source_ip", "TEXT"),
+                               ("security_events", "device_id", "INTEGER"),
+                               ("devices", "posture", "TEXT"),
+                               ("commands", "param", "TEXT"),
+                               ("password_resets", "purpose", "TEXT NOT NULL DEFAULT 'reset'"),
+                               ("organisations", "plan", "TEXT NOT NULL DEFAULT 'free'"),
+                               ("organisations", "plan_expires", "TEXT")):
+        if column not in {row[1] for row in db.execute(f"PRAGMA table_info({table})")}:
+            db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+    if db.execute("SELECT COUNT(*) FROM organisations").fetchone()[0] == 0:
+        db.execute("INSERT INTO organisations (name, is_platform, created_at) VALUES ('MellowTech', 1, ?)", (iso(utcnow()),))
+    owner = db.execute("SELECT id FROM organisations WHERE is_platform = 1 ORDER BY id LIMIT 1").fetchone()[0]
+    db.execute("UPDATE users SET org_id = ? WHERE org_id IS NULL", (owner,))
+    db.execute("UPDATE security_events SET org_id = ? WHERE org_id IS NULL", (owner,))
+    # the old code wrote a row on every refresh: trim that history
+    db.execute("DELETE FROM system_telemetry WHERE id NOT IN "
+               "(SELECT id FROM system_telemetry ORDER BY id DESC LIMIT ?)", (TELEMETRY_KEEP_ROWS,))
+    db.commit()
+    db.close()
+
+
+def password_problem(password):
+    if len(password) < 10:
+        return "Use at least 10 characters."
+    if len(password) > 128:
+        return "That password is too long (128 characters at most)."
+    if password.lower() in COMMON_PASSWORDS or len(set(password)) < 5:
+        return "That password is too easy to guess. Choose a different one."
+    return None
+
+
+def notify_staff(subject, body):
+    for row in get_db().execute("SELECT u.email FROM users u JOIN organisations o ON o.id = u.org_id "
+                                "WHERE o.is_platform = 1 AND u.role = 'admin' AND u.active = 1").fetchall():
+        send_email(row["email"], subject, body)
+
+
+def local_url(url):
+    return (urllib.parse.urlparse(url).hostname or "") in ("127.0.0.1", "localhost", "::1")
+
+
+def email_ready():
+    """True when real email is set up, or when running on this computer (links are then printed in the server window)."""
+    return bool(os.environ.get("SMTP_HOST")) or local_url(BASE_URL)
+
+
+def deliver_email(to, subject, body):
+    """Send one email. Raises an exception that explains why when it cannot be sent."""
+    host = os.environ.get("SMTP_HOST")
+    if not host:                                    # development: show the email in this window
+        print(f"\n[EMAIL NOT SENT: SMTP_HOST is not set, so it is only shown here]\nTo: {to}\nSubject: {subject}\n{body}\n", flush=True)
+        return
+    message = EmailMessage()
+    message["From"] = os.environ.get("SMTP_FROM") or os.environ.get("SMTP_USER") or "no-reply@localhost"
+    message["To"], message["Subject"] = to, subject
+    message.set_content(body)
+    port = int(os.environ.get("SMTP_PORT", "587"))
+    security = os.environ.get("SMTP_SECURITY", "ssl" if port == 465 else "starttls").lower()    # starttls, ssl or none
+    connection = smtplib.SMTP_SSL if security == "ssl" else smtplib.SMTP
+    with connection(host, port, timeout=20) as smtp:
+        if security == "starttls":
+            smtp.starttls()
+        if os.environ.get("SMTP_USER"):
+            smtp.login(os.environ["SMTP_USER"], os.environ.get("SMTP_PASSWORD", ""))
+        smtp.send_message(message)
+
+
+def send_email(to, subject, body):
+    """Send an email without ever raising. The reason for a failure is printed in the server window."""
+    try:
+        deliver_email(to, subject, body)
+        return True
+    except Exception as exc:
+        print(f"Could not send email to {to}: {exc}", flush=True)
+        return False
+
+
+# ---------------------------------------------------------------- sessions and guards
+def current_user():
+    uid = session.get("uid")
+    if not uid:
+        return None
+    user = get_db().execute("SELECT u.id,u.email,u.name,u.role,u.active,u.approval,u.session_version,u.org_id,o.name AS org_name,o.is_platform "
+                            "FROM users u JOIN organisations o ON o.id = u.org_id WHERE u.id = ?", (uid,)).fetchone()
+    if not user or not user["active"] or user["approval"] != "approved" or user["session_version"] != session.get("sv"):
+        session.clear()
+        return None
+    return user
+
+
+def login_required(role=None):
+    def decorator(view):
+        @wraps(view)
+        def wrapper(*args, **kwargs):
+            user = current_user()
+            if not user:
+                return error("Sign in required.", 401)
+            if role == "platform_admin":        # MellowTech administrators only (approving accounts)
+                if not (user["is_platform"] and user["role"] == "admin"):
+                    return error("Only MellowTech administrators can do that.", 403)
+            elif role == "platform":              # MellowTech staff only (server and network details)
+                if not user["is_platform"]:
+                    return error("This is only available to MellowTech staff.", 403)
+            elif role and user["role"] != role:
+                return error("You do not have permission to do that.", 403)
+            g.user = user
+            return view(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+@app.before_request
+def api_guard():
+    if request.path.startswith("/api/") and request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        if request.path != "/api/documents/scan" and (request.content_length or 0) > 16 * 1024:
+            return error("That request is too large.", 413)
+        if request.path == "/api/payfast/notify":
+            return   # Payfast posts this as a form, not JSON, and signs it its own way
+        if not request.is_json:
+            return error("Send JSON.", 415)
+        if request.path not in ("/api/auth/login", "/api/auth/forgot", "/api/auth/reset",
+                                "/api/auth/register", "/api/auth/verify") and not request.path.startswith("/api/agent/"):
+            token = request.headers.get("X-CSRF-Token", "")
+            if not session.get("csrf") or not secrets.compare_digest(token, session["csrf"]):
+                return error("Security token missing or invalid. Reload the page.", 403)
+
+
+@app.after_request
+def security_headers(response):
+    response.headers.update({
+        "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
+        "Referrer-Policy": "same-origin", "Permissions-Policy": "camera=(), microphone=(), geolocation=()"})
+    if request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    if BASE_URL.startswith("https://"):
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
+    return response
+
+
+# ---------------------------------------------------------------- web pages (same origin as the API)
+@app.get("/")
+def home():
+    return redirect("/index.html" if current_user() else "/login.html")
+
+
+@app.get("/<path:name>")
+def pages(name):
+    if name == "index.html":
+        if not current_user():
+            return redirect("/login.html")
+    elif name not in PUBLIC_PAGES:
+        abort(404)
+    response = send_from_directory(ROOT, name)
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.errorhandler(404)
+def not_found(_exc):
+    return error("Not found.", 404) if request.path.startswith("/api/") else ("Not found", 404)
+
+
+@app.errorhandler(Exception)
+def unexpected_error(exc):
+    if isinstance(exc, HTTPException):          # 405, 413 and so on
+        if request.path.startswith("/api/"):
+            return error(exc.description or exc.name, exc.code)
+        return exc
+    app.logger.exception("Unexpected error on %s %s", request.method, request.path)   # full details go to this window
+    if request.path.startswith("/api/"):
+        return error("Something went wrong inside the server. The details are in the server window.", 500)
+    return "Server error", 500
+
+
+# ---------------------------------------------------------------- authentication
+@app.post("/api/auth/login")
+def login():
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email", "")).strip().lower()[:254]
+    password = str(data.get("password", ""))[:256]
+    ip = request.remote_addr or "?"
+    if too_many("login-ip:" + ip, 30, 300) or too_many("login-user:" + email, 10, 300):
+        return error("Too many attempts. Wait a few minutes and try again.", 429)
+
+    db = get_db()
+    user = db.execute("SELECT * FROM users WHERE email = ?", (email,)).fetchone()
+    locked = bool(user and user["locked_until"] and datetime.fromisoformat(user["locked_until"]) > utcnow())
+    valid = check_password_hash(user["password_hash"] if user else DUMMY_HASH, password)
+
+    if not (user and user["active"] and valid and not locked):
+        if user and not locked:
+            fails = user["failed_attempts"] + 1
+            until = iso(utcnow() + timedelta(minutes=LOCK_MINUTES)) if fails >= MAX_FAILED_LOGINS else None
+            db.execute("UPDATE users SET failed_attempts=?, locked_until=? WHERE id=?",
+                       (0 if until else fails, until, user["id"]))
+            db.commit()
+        audit("login_failed", email)
+        return error("Invalid email or password.", 401)
+
+    if not user["email_verified"]:
+        return error("Please confirm your email first. Open the link we sent you.", 403)
+    if user["approval"] != "approved":
+        return error(APPROVAL_MESSAGES.get(user["approval"], APPROVAL_MESSAGES["pending"]), 403)
+    db.execute("UPDATE users SET failed_attempts=0, locked_until=NULL, last_login=? WHERE id=?",
+               (iso(utcnow()), user["id"]))
+    db.commit()
+    session.clear()
+    session.permanent = True
+    session.update(uid=user["id"], sv=user["session_version"], csrf=secrets.token_urlsafe(24))
+    audit("login", email, user["id"])
+    return jsonify({"ok": True})
+
+
+@app.post("/api/auth/logout")
+@login_required()
+def logout():
+    audit("logout", g.user["email"], g.user["id"])
+    session.clear()
+    return jsonify({"ok": True})
+
+
+@app.get("/api/auth/me")
+@login_required()
+def me():
+    user = g.user
+    org = get_db().execute("SELECT plan, plan_expires FROM organisations WHERE id = ?", (user["org_id"],)).fetchone()
+    plan, expires = org["plan"], org["plan_expires"]
+    if plan != "free" and expires and expires < iso(utcnow()):
+        plan = "free"        # paid time has run out
+    return jsonify({"user": {"email": user["email"], "name": user["name"], "role": user["role"],
+                             "org": user["org_name"], "is_platform": bool(user["is_platform"]),
+                             "plan": plan, "plan_expires": expires},
+                    "csrf": session["csrf"]})
+
+
+@app.post("/api/auth/forgot")
+def forgot():
+    data = request.get_json(silent=True) or {}
+    email = str(data.get("email", "")).strip().lower()[:254]
+    if too_many("forgot-ip:" + (request.remote_addr or "?"), 5, 900) or too_many("forgot-user:" + email, 3, 900):
+        return error("Too many requests. Try again later.", 429)
+
+    db = get_db()
+    user = db.execute("SELECT id, email, name, active FROM users WHERE email = ?", (email,)).fetchone()
+    if user and user["active"]:
+        token = secrets.token_urlsafe(32)
+        db.execute("DELETE FROM password_resets WHERE user_id = ? AND purpose = 'reset'", (user["id"],))
+        db.execute("INSERT INTO password_resets (user_id, token_hash, expires_at) VALUES (?,?,?)",
+                   (user["id"], sha(token), iso(utcnow() + timedelta(minutes=RESET_MINUTES))))
+        db.commit()
+        audit("reset_requested", email, user["id"])
+        send_email(user["email"], "Reset your MellowTech password",
+                   f"Hello {user['name']},\n\nUse this link to choose a new password "
+                   f"(valid for {RESET_MINUTES} minutes, one use):\n{BASE_URL}/reset.html?token={token}\n\n"
+                   "If you did not ask for this, ignore this email; your password has not changed.")
+    # same answer whether or not the account exists
+    return jsonify({"message": "If that email has an account, a reset link is on its way."})
+
+
+@app.post("/api/auth/reset")
+def reset():
+    data = request.get_json(silent=True) or {}
+    token = str(data.get("token", ""))[:200]
+    password = str(data.get("password", ""))
+    if too_many("reset-ip:" + (request.remote_addr or "?"), 10, 900):
+        return error("Too many attempts. Try again later.", 429)
+    problem = password_problem(password)
+    if problem:
+        return error(problem, 400)
+
+    db = get_db()
+    row = db.execute("SELECT * FROM password_resets WHERE token_hash = ? AND purpose = 'reset'", (sha(token),)).fetchone()
+    if not row or datetime.fromisoformat(row["expires_at"]) < utcnow():
+        return error("This reset link is invalid or has expired. Request a new one.", 400)
+
+    db.execute("UPDATE users SET password_hash=?, failed_attempts=0, locked_until=NULL, email_verified=1, "
+               "session_version=session_version+1 WHERE id=?",
+               (hash_password(password), row["user_id"]))
+    db.execute("DELETE FROM password_resets WHERE user_id = ? AND purpose = 'reset'", (row["user_id"],))
+    db.commit()
+    audit("password_reset", "", row["user_id"])
+    return jsonify({"message": "Password updated. You can sign in now."})
+
+
+def create_company_and_admin(company, name, email, password_hash, verified):
+    db = get_db()
+    org_id = db.execute("INSERT INTO organisations (name, is_platform, created_at) VALUES (?, 0, ?)",
+                        (company[:120], iso(utcnow()))).lastrowid
+    user_id = db.execute("INSERT INTO users (email,name,password_hash,role,created_at,org_id,email_verified,approval) "
+                         "VALUES (?,?,?,'admin',?,?,?,?)",
+                         (email, name[:120], password_hash, iso(utcnow()), org_id, 1 if verified else 0,
+                          "pending" if REQUIRE_APPROVAL else "approved")).lastrowid
+    db.commit()
+    return user_id
+
+
+def send_verification(user_id, email, name):
+    token = secrets.token_urlsafe(32)
+    db = get_db()
+    db.execute("DELETE FROM password_resets WHERE user_id = ? AND purpose = 'verify'", (user_id,))
+    db.execute("INSERT INTO password_resets (user_id, token_hash, expires_at, purpose) VALUES (?,?,?,'verify')",
+               (user_id, sha(token), iso(utcnow() + timedelta(hours=VERIFY_HOURS))))
+    db.commit()
+    return send_email(email, "Confirm your MellowTech account",
+               f"Hello {name},\n\nConfirm your email to activate your account (valid for {VERIFY_HOURS} hours):\n"
+               f"{BASE_URL}/register.html?verify={token}\n\nIf you did not sign up, ignore this email.")
+
+
+@app.post("/api/auth/register")
+def register():
+    data = request.get_json(silent=True) or {}
+    company = str(data.get("company", "")).strip()
+    name = str(data.get("name", "")).strip()
+    email = str(data.get("email", "")).strip().lower()[:254]
+    password = str(data.get("password", ""))
+    if too_many("register-ip:" + (request.remote_addr or "?"), 10, 3600):
+        return error("Too many sign-ups from this connection. Try again later.", 429)
+    if len(company) < 2 or len(name) < 2 or "@" not in email or "." not in email.split("@")[-1]:
+        return error("Please fill in your company, your name and a valid email address.", 400)
+    problem = password_problem(password)
+    if problem:
+        return error(problem, 400)
+
+    if not email_ready():
+        return error("Sign-up is not available yet because this server cannot send email. Please contact MellowTech.", 503)
+    existing = get_db().execute("SELECT id, name, email_verified FROM users WHERE email = ?", (email,)).fetchone()
+    sent = True
+    if existing is None:
+        user_id = create_company_and_admin(company, name, email, hash_password(password), False)
+        audit("registered", email, user_id)
+        sent = send_verification(user_id, email, name)
+    elif not existing["email_verified"]:
+        sent = send_verification(existing["id"], email, existing["name"])      # lost the first email: send a new link
+    if not sent:
+        return error("We could not send the confirmation email right now. Please try again in a few minutes.", 503)
+    # same answer in every case, so nobody can use this form to find out who has an account
+    return jsonify({"message": "Almost done. We sent a confirmation link to your email. Open it, then our team will review your request and email you." if REQUIRE_APPROVAL
+                    else "Almost done. We sent a confirmation link to your email. Open it to activate your account."})
+
+
+@app.post("/api/auth/verify")
+def verify_email():
+    data = request.get_json(silent=True) or {}
+    if too_many("verify-ip:" + (request.remote_addr or "?"), 20, 900):
+        return error("Too many attempts. Try again later.", 429)
+    db = get_db()
+    row = db.execute("SELECT * FROM password_resets WHERE token_hash = ? AND purpose = 'verify'",
+                     (sha(str(data.get("token", ""))[:200]),)).fetchone()
+    if not row or datetime.fromisoformat(row["expires_at"]) < utcnow():
+        return error("This confirmation link is invalid or has expired. Register again to get a new one.", 400)
+    db.execute("UPDATE users SET email_verified = 1 WHERE id = ?", (row["user_id"],))
+    db.execute("DELETE FROM password_resets WHERE user_id = ? AND purpose = 'verify'", (row["user_id"],))
+    db.commit()
+    audit("email_confirmed", "", row["user_id"])
+    person = db.execute("SELECT u.name, u.email, u.approval, o.name AS company FROM users u JOIN organisations o ON o.id = u.org_id "
+                        "WHERE u.id = ?", (row["user_id"],)).fetchone()
+    if person["approval"] == "pending":
+        notify_staff("New MellowTech account request",
+                     f"{person['name']} <{person['email']}> from {person['company']} confirmed their email and is waiting "
+                     f"for approval. Open the dashboard and go to Account requests to approve or reject.")
+        return jsonify({"message": "Email confirmed. Your account is now waiting for approval. We will email you when it is ready."})
+    return jsonify({"message": "Email confirmed. You can sign in now."})
+
+
+@app.get("/api/auth/providers")
+def providers():
+    return jsonify({name: bool(cfg["id"] and cfg["secret"]) for name, cfg in OAUTH.items()})
+
+
+def http_json(url, form=None, headers=None):
+    req = urllib.request.Request(
+        url,
+        data=urllib.parse.urlencode(form).encode() if form else None,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "MellowTech",
+            **(headers or {})
+        }
+    )
+    with urllib.request.urlopen(req, timeout=10) as response:
+        return json.loads(response.read().decode())
+
+
+@app.get("/auth/<provider>/start")
+def oauth_start(provider):
+    cfg = OAUTH.get(provider)
+    if not cfg or not (cfg["id"] and cfg["secret"]):
+        return redirect("/login.html?error=provider_off")
+    state = secrets.token_urlsafe(24)
+    session["oauth_state"], session["oauth_provider"] = state, provider
+    params = {"client_id": cfg["id"], "redirect_uri": f"{BASE_URL}/auth/{provider}/callback",
+              "response_type": "code", "scope": cfg["scope"], "state": state}
+    if provider == "google":
+        params["prompt"] = "select_account"
+    return redirect(cfg["auth"] + "?" + urllib.parse.urlencode(params))
+
+
+@app.get("/auth/<provider>/callback")
+def oauth_callback(provider):
+    cfg = OAUTH.get(provider)
+    expected, started = session.pop("oauth_state", None), session.pop("oauth_provider", None)
+    if not cfg or started != provider or not expected or not secrets.compare_digest(request.args.get("state", ""), expected):
+        print(f"OAuth sign-in with {provider} failed: the state check did not match. "
+              f"Open the site at {BASE_URL} (not a different address) and try again.", flush=True)
+        return redirect("/login.html?error=oauth_failed")
+    if request.args.get("error") or not request.args.get("code"):
+        print(f"OAuth sign-in with {provider} was cancelled or refused: {request.args.get('error_description') or request.args.get('error')}", flush=True)
+        return redirect("/login.html?error=oauth_denied")
+    try:
+        token = http_json(cfg["token"], {"client_id": cfg["id"], "client_secret": cfg["secret"],
+                                         "code": request.args["code"], "grant_type": "authorization_code",
+                                         "redirect_uri": f"{BASE_URL}/auth/{provider}/callback"})["access_token"]
+        auth = {"Authorization": "Bearer " + token}
+        if provider == "google":
+            info = http_json(cfg["userinfo"], headers=auth)
+            email, verified, name = info.get("email", ""), info.get("email_verified") in (True, "true"), info.get("name", "")
+        else:
+            profile = http_json(cfg["userinfo"], headers=auth)
+            primary = next((e for e in http_json(cfg["emails"], headers=auth) if e.get("primary") and e.get("verified")), None)
+            email, verified = (primary or {}).get("email", ""), primary is not None
+            name = profile.get("name") or profile.get("login", "")
+    except Exception as exc:
+        detail = ""
+        if hasattr(exc, "read"):                # an HTTP error: show what the provider said
+            try:
+                detail = " | " + exc.read().decode()[:300]
+            except Exception:
+                pass
+        print(f"OAuth sign-in with {provider} failed: {exc}{detail}", flush=True)
+        return redirect("/login.html?error=oauth_failed")
+
+    email = str(email).strip().lower()
+    if not email or not verified:               # only trust an email the provider has verified
+        print(f"OAuth sign-in with {provider}: no verified email address was returned.", flush=True)
+        return redirect("/login.html?error=oauth_unverified")
+
+    db = get_db()
+    user = db.execute("SELECT id, name, active, approval, session_version FROM users WHERE email = ?", (email,)).fetchone()
+    if user is None:
+        who = name or email.split("@")[0]
+        user_id = create_company_and_admin(f"{who}'s company", who, email, hash_password(secrets.token_urlsafe(32)), True)
+        user = db.execute("SELECT id, name, active, approval, session_version FROM users WHERE id = ?", (user_id,)).fetchone()
+        audit("registered_" + provider, email, user_id)
+        if user["approval"] == "pending":
+            notify_staff("New MellowTech account request",
+                         f"{who} <{email}> signed up with {provider.title()} and is waiting for approval. "
+                         f"Open the dashboard and go to Account requests.")
+    elif not user["active"]:
+        return redirect("/login.html?error=oauth_failed")
+    db.execute("UPDATE users SET email_verified = 1, last_login = ?, failed_attempts = 0, locked_until = NULL WHERE id = ?",
+               (iso(utcnow()), user["id"]))
+    db.commit()
+    if user["approval"] != "approved":
+        return redirect("/login.html?error=" + user["approval"])      # "pending" or "rejected"
+    session.clear()
+    session.permanent = True
+    session.update(uid=user["id"], sv=user["session_version"], csrf=secrets.token_urlsafe(24))
+    audit("login_" + provider, email, user["id"])
+    return redirect("/index.html")
+
+
+# ---------------------------------------------------------------- PayPal payments
+def paypal_call(method, path, body=None):
+    """Talk to PayPal. The secret never leaves the server."""
+    if not (PAYPAL_CLIENT_ID and PAYPAL_SECRET):
+        raise RuntimeError("PayPal keys are not set in settings.env")
+    basic = base64.b64encode(f"{PAYPAL_CLIENT_ID}:{PAYPAL_SECRET}".encode()).decode()
+    token_req = urllib.request.Request(
+        PAYPAL_API + "/v1/oauth2/token", data=b"grant_type=client_credentials",
+        headers={"Authorization": "Basic " + basic, "Accept": "application/json",
+                 "Content-Type": "application/x-www-form-urlencoded"})
+    with urllib.request.urlopen(token_req, timeout=15) as response:
+        token = json.loads(response.read().decode())["access_token"]
+    req = urllib.request.Request(
+        PAYPAL_API + path, method=method, data=json.dumps(body if body is not None else {}).encode(),
+        headers={"Authorization": "Bearer " + token, "Accept": "application/json",
+                 "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=15) as response:
+        return json.loads(response.read().decode())
+
+
+def is_first_purchase(org_id):
+    """True when this company has never paid, so the one-time setup fee still applies."""
+    db = get_db()
+    if db.execute("SELECT 1 FROM payments WHERE org_id = ? AND status = 'completed' LIMIT 1", (org_id,)).fetchone():
+        return False
+    if db.execute("SELECT 1 FROM payfast_payments WHERE org_id = ? AND paid_at IS NOT NULL LIMIT 1", (org_id,)).fetchone():
+        return False
+    return True
+
+
+def amount_due(org_id, plan):
+    """Monthly price, plus the setup fee on the first purchase. Returned as text like '58.00'."""
+    total = Decimal(plan["price"])
+    if plan.get("setup_fee") and is_first_purchase(org_id):
+        total += Decimal(plan["setup_fee"])
+    return f"{total:.2f}"
+
+
+@app.get("/api/billing")
+@login_required()
+def billing_info():
+    org = get_db().execute("SELECT plan, plan_expires FROM organisations WHERE id = ?", (g.user["org_id"],)).fetchone()
+    first = is_first_purchase(g.user["org_id"])
+    return jsonify({"paypal_client_id": PAYPAL_CLIENT_ID if PAYPAL_SECRET else "",
+                    "currency": PAYPAL_CURRENCY, "plan": org["plan"], "plan_expires": org["plan_expires"],
+                    "plans": [{"key": k, **v, "setup_fee": (v.get("setup_fee") or "") if first else ""} for k, v in PLANS.items()]})
+
+
+@app.post("/api/paypal/create-order")
+@login_required("admin")
+def paypal_create_order():
+    plan_key = (request.get_json(silent=True) or {}).get("plan")
+    plan = PLANS.get(plan_key)
+    if not plan:
+        return error("Unknown plan.", 400)
+    if too_many("pay:" + str(g.user["id"]), 10, 600):
+        return error("Too many attempts. Wait a few minutes.", 429)
+    charge = amount_due(g.user["org_id"], plan)
+    try:
+        order = paypal_call("POST", "/v2/checkout/orders", {
+            "intent": "CAPTURE",
+            "purchase_units": [{
+                "reference_id": plan_key, "custom_id": str(g.user["org_id"]),
+                "description": f"MellowTech {plan['name']} ({plan['days']} days)",
+                "amount": {"currency_code": PAYPAL_CURRENCY, "value": charge}}]})
+    except Exception as exc:
+        print(f"PayPal create-order failed: {exc}", flush=True)
+        return error("Could not reach PayPal right now. Please try again.", 502)
+    db = get_db()
+    db.execute("INSERT INTO payments (org_id,user_id,plan,amount,currency,order_id,created_at) VALUES (?,?,?,?,?,?,?)",
+               (g.user["org_id"], g.user["id"], plan_key, charge, PAYPAL_CURRENCY, order["id"], iso(utcnow())))
+    db.commit()
+    return jsonify({"id": order["id"]})
+
+
+@app.post("/api/paypal/capture-order")
+@login_required("admin")
+def paypal_capture_order():
+    order_id = str((request.get_json(silent=True) or {}).get("order_id", ""))[:64]
+    db = get_db()
+    row = db.execute("SELECT * FROM payments WHERE order_id = ? AND org_id = ?", (order_id, g.user["org_id"])).fetchone()
+    if not row:
+        return error("Order not found.", 404)
+    if row["status"] == "completed":
+        return jsonify({"ok": True, "plan": row["plan"]})
+    try:
+        result = paypal_call("POST", f"/v2/checkout/orders/{urllib.parse.quote(order_id)}/capture")
+        capture = result["purchase_units"][0]["payments"]["captures"][0]
+        paid = (result.get("status") == "COMPLETED" and capture.get("status") == "COMPLETED"
+                and capture["amount"]["currency_code"] == row["currency"]
+                and Decimal(capture["amount"]["value"]) == Decimal(row["amount"]))
+    except Exception as exc:
+        print(f"PayPal capture failed: {exc}", flush=True)
+        return error("The payment could not be confirmed. If PayPal charged you, contact MellowTech.", 502)
+    if not paid:
+        db.execute("UPDATE payments SET status = 'failed' WHERE id = ?", (row["id"],))
+        db.commit()
+        return error("The payment was not completed.", 402)
+
+    org = db.execute("SELECT plan_expires FROM organisations WHERE id = ?", (row["org_id"],)).fetchone()
+    start = utcnow()
+    if org["plan_expires"] and org["plan_expires"] > iso(start):
+        start = datetime.fromisoformat(org["plan_expires"])        # paying early adds to the time left
+    expires = iso(start + timedelta(days=PLANS[row["plan"]]["days"]))
+    db.execute("UPDATE organisations SET plan = ?, plan_expires = ? WHERE id = ?", (row["plan"], expires, row["org_id"]))
+    db.execute("UPDATE payments SET status = 'completed', capture_id = ?, paid_at = ? WHERE id = ?",
+               (capture.get("id"), iso(utcnow()), row["id"]))
+    db.commit()
+    audit("payment_completed", f"{row['plan']} {row['amount']} {row['currency']}")
+    return jsonify({"ok": True, "plan": row["plan"], "plan_expires": expires})
+
+
+# ---------------------------------------------------------------- data
+@app.get("/api/status")
+def status():
+    return jsonify({"status": "online", "version": VERSION})
+
+
+@app.get("/api/events")
+@login_required()
+def events():
+    rows = get_db().execute("SELECT id AS row_key,event_id,event_type,device,severity,status,description,timestamp,source_ip "
+                            "FROM security_events WHERE org_id = ? ORDER BY id DESC", (g.user["org_id"],)).fetchall()
+    return jsonify([{"row_key": r["row_key"], "id": r["event_id"], "type": r["event_type"], "device": r["device"],
+                     "severity": r["severity"], "status": r["status"], "source_ip": r["source_ip"],
+                     "description": r["description"], "timestamp": r["timestamp"]} for r in rows])
+
+
+@app.post("/api/events")
+@login_required("admin")
+def create_event():
+    data = request.get_json(silent=True) or {}
+    severity = data.get("severity", "Low")
+    status_value = data.get("status", "New")
+    if severity not in ("Low", "Medium", "High"):
+        return error("Invalid severity.", 400)
+    if status_value not in ALERT_STATUSES:
+        return error("Invalid status.", 400)
+
+    source_ip = clean_ip(data["source_ip"]) if data.get("source_ip") else None
+    if data.get("source_ip") and not source_ip:
+        return error("That source address is not a valid IP address.", 400)
+    stamp = datetime.now().isoformat()
+    db = get_db()
+    cursor = db.execute(
+        "INSERT INTO security_events (event_id,event_type,device,severity,status,description,timestamp,org_id,source_ip) "
+        "VALUES ('PENDING',?,?,?,?,?,?,?,?)",
+        (str(data.get("type", "Security Event"))[:100], str(data.get("device", socket.gethostname()))[:100],
+         severity, status_value, str(data.get("description", "Security monitoring event recorded."))[:500], stamp, g.user["org_id"], source_ip))
+    event_id = f"EVT-{cursor.lastrowid:03d}"
+    db.execute("UPDATE security_events SET event_id=? WHERE id=?", (event_id, cursor.lastrowid))
+    db.commit()
+    audit("event_created", event_id)
+    return jsonify({"message": "Security event created", "event_id": event_id, "timestamp": stamp}), 201
+
+
+_last_telemetry = 0.0
+
+
+def store_telemetry(values):
+    """History is saved at most once a minute (it used to be on every refresh)."""
+    global _last_telemetry
+    if time.time() - _last_telemetry < TELEMETRY_EVERY_SECONDS:
+        return
+    _last_telemetry = time.time()
+    db = get_db()
+    db.execute("INSERT INTO system_telemetry (hostname,operating_system,processor,cpu_usage,memory_usage,disk_usage,timestamp) "
+               "VALUES (?,?,?,?,?,?,?)", values)
+    db.execute("DELETE FROM system_telemetry WHERE id NOT IN "
+               "(SELECT id FROM system_telemetry ORDER BY id DESC LIMIT ?)", (TELEMETRY_KEEP_ROWS,))
+    db.commit()
+
+
+@app.get("/api/system")
+@login_required("platform")
+def system_info():
+    memory, disk = psutil.virtual_memory(), psutil.disk_usage("/")
+    cpu = psutil.cpu_percent(interval=None)
+    hostname, os_name, processor = socket.gethostname(), platform.system(), platform.processor()
+    stamp = datetime.now().isoformat()
+    store_telemetry((hostname, os_name, processor, cpu, memory.percent, disk.percent, stamp))
+    return jsonify({
+        "hostname": hostname, "operating_system": os_name, "operating_system_version": platform.version(),
+        "processor": processor, "cpu_usage_percent": cpu, "memory_usage_percent": memory.percent,
+        "memory_total_gb": round(memory.total / 1024 ** 3, 2), "disk_usage_percent": disk.percent,
+        "disk_total_gb": round(disk.total / 1024 ** 3, 2), "timestamp": stamp})
+
+
+@app.get("/api/network")
+@login_required("platform")
+def network_info():
+    addresses, stats, counters = psutil.net_if_addrs(), psutil.net_if_stats(), psutil.net_io_counters(pernic=True)
+    interfaces = []
+    for name, addrs in addresses.items():
+        ipv4 = next((a.address for a in addrs if a.family == socket.AF_INET), "Not available")
+        ipv6 = next((a.address for a in addrs if a.family == socket.AF_INET6), "Not available")
+        st, io = stats.get(name), counters.get(name)
+        speed = st.speed if st else 0
+        interfaces.append({
+            "name": name, "ipv4": ipv4, "ipv6": ipv6, "is_up": st.isup if st else False,
+            "speed": speed, "speed_mbps": speed,
+            "bytes_sent": io.bytes_sent if io else 0, "bytes_received": io.bytes_recv if io else 0,
+            "packets_sent": io.packets_sent if io else 0, "packets_received": io.packets_recv if io else 0})
+    return jsonify({"hostname": socket.gethostname(), "timestamp": datetime.now().isoformat(), "interfaces": interfaces})
+
+
+@app.get("/api/telemetry")
+@login_required("platform")
+def telemetry():
+    rows = get_db().execute("SELECT hostname,operating_system,cpu_usage,memory_usage,disk_usage,timestamp "
+                            "FROM system_telemetry ORDER BY id DESC LIMIT 50").fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+@app.get("/api/database")
+@login_required("platform")
+def database_info():
+    db = get_db()
+    return jsonify({"security_events": db.execute("SELECT COUNT(*) FROM security_events").fetchone()[0],
+                    "telemetry_records": db.execute("SELECT COUNT(*) FROM system_telemetry").fetchone()[0],
+                    "users": db.execute("SELECT COUNT(*) FROM users").fetchone()[0], "status": "Connected"})
+
+
+# ---------------------------------------------------------------- devices, agents, alerts and blocking
+def clean_ip(value):
+    try:
+        return str(ipaddress.ip_address(str(value).strip()))
+    except ValueError:
+        return None
+
+
+def block_problem(ip, org_id):
+    """Addresses we refuse to block, so a click can never cut the company off from itself."""
+    addr = ipaddress.ip_address(ip)
+    if addr.is_loopback or addr.is_unspecified or addr.is_multicast or addr.is_link_local:
+        return "That address cannot be blocked (loopback, link-local or multicast)."
+    if ip == (urllib.parse.urlparse(BASE_URL).hostname or ""):
+        return "That is the address of the MellowTech server itself."
+    own = {row["ip"] for row in get_db().execute("SELECT ip FROM devices WHERE org_id = ?", (org_id,))}
+    if ip in own:
+        return "That is one of your own connected laptops."
+    return None
+
+
+def queue_commands(org_id, block_id, ip, action):
+    db = get_db()
+    ids = [row["id"] for row in db.execute("SELECT id FROM devices WHERE org_id = ?", (org_id,))]
+    for device_id in ids:
+        db.execute("INSERT INTO commands (org_id,device_id,block_id,action,ip,created_at) VALUES (?,?,?,?,?,?)",
+                   (org_id, device_id, block_id, action, ip, iso(utcnow())))
+    return len(ids)
+
+
+def lift_block(block, new_status):
+    db = get_db()
+    db.execute("UPDATE blocks SET status = ? WHERE id = ?", (new_status, block["id"]))
+    db.execute("UPDATE commands SET status = 'cancelled' WHERE block_id = ? AND action = 'block' AND status = 'pending'",
+               (block["id"],))
+    queue_commands(block["org_id"], block["id"], block["ip"], "unblock")
+    if block["event_id"]:       # the alert that led to this block goes back to "Investigating"
+        db.execute("UPDATE security_events SET status = 'Investigating' WHERE id = ? AND org_id = ? AND status = 'Blocked'",
+                   (block["event_id"], block["org_id"]))
+    db.commit()
+
+
+def expire_blocks(org_id):
+    for block in get_db().execute("SELECT * FROM blocks WHERE org_id = ? AND status = 'active' "
+                                  "AND expires_at IS NOT NULL AND expires_at < ?", (org_id, iso(utcnow()))).fetchall():
+        lift_block(block, "expired")
+
+
+@app.get("/api/devices")
+@login_required()
+def devices():
+    cutoff = iso(utcnow() - timedelta(seconds=ONLINE_SECONDS))
+    db = get_db()
+    rows = db.execute("SELECT * FROM devices WHERE org_id = ? ORDER BY name", (g.user["org_id"],)).fetchall()
+    last = {}
+    for c in db.execute("SELECT device_id, action, status, result, created_at FROM commands WHERE org_id = ? AND action IN (%s) "
+                        "ORDER BY id DESC LIMIT 400" % ",".join("?" * len(DEVICE_ACTIONS)), (g.user["org_id"], *DEVICE_ACTIONS)):
+        last.setdefault(c["device_id"], {"action": c["action"], "status": c["status"], "result": c["result"], "at": c["created_at"]})
+
+    def posture_of(row):
+        try:
+            return json.loads(row["posture"]) if row["posture"] else None
+        except ValueError:
+            return None
+    return jsonify([{"id": r["id"], "name": r["name"], "os": r["os"], "ip": r["ip"], "cpu": r["cpu"],
+                     "memory": r["memory"], "disk": r["disk"], "version": r["agent_version"],
+                     "last_seen": r["last_seen"], "online": bool(r["last_seen"]) and r["last_seen"] >= cutoff,
+                     "posture": posture_of(r), "last_command": last.get(r["id"])} for r in rows])
+
+
+@app.post("/api/devices/<int:device_id>/command")
+@login_required("admin")
+def device_command(device_id):
+    """An administrator sends one action to one laptop (virus scan, isolate, USB control ...)."""
+    lock = locked("device_command")
+    if lock:
+        return lock
+    data = request.get_json(silent=True) or {}
+    action = data.get("action")
+    if action not in DEVICE_ACTIONS:
+        return error("Unknown action.", 400)
+    db = get_db()
+    device = db.execute("SELECT * FROM devices WHERE id = ? AND org_id = ?", (device_id, g.user["org_id"])).fetchone()
+    if not device:
+        return error("Device not found.", 404)
+    if not device["last_seen"] or device["last_seen"] < iso(utcnow() - timedelta(seconds=ONLINE_SECONDS)):
+        return error("That laptop is offline right now, so it cannot receive the order. Try again when it is online.", 409)
+    param = None
+    if action == "isolate":
+        try:
+            minutes = int(data.get("minutes", 60))
+        except (TypeError, ValueError):
+            minutes = 0
+        if not 5 <= minutes <= 480:
+            return error("Choose an isolation time between 5 minutes and 8 hours.", 400)
+        param = str(minutes)
+    db.execute("INSERT INTO commands (org_id,device_id,block_id,action,ip,param,status,created_at) VALUES (?,?,NULL,?,'',?,'pending',?)",
+               (g.user["org_id"], device_id, action, param, iso(utcnow())))
+    db.commit()
+    audit("device_" + action, device["name"] + (f" for {param} minutes" if param else ""))
+    return jsonify({"ok": True}), 201
+
+
+@app.post("/api/devices/enroll-key")
+@login_required("admin")
+def enroll_key():
+    key = "mtk_" + secrets.token_urlsafe(18)
+    get_db().execute("INSERT INTO enroll_keys (org_id,key_hash,created_by,expires_at) VALUES (?,?,?,?)",
+                     (g.user["org_id"], sha(key), g.user["id"], iso(utcnow() + timedelta(minutes=60))))
+    get_db().commit()
+    audit("enroll_key_created", "", g.user["id"])
+    return jsonify({"key": key, "expires_minutes": 60})
+
+
+@app.post("/api/devices/<int:device_id>/remove")
+@login_required("admin")
+def remove_device(device_id):
+    db = get_db()
+    row = db.execute("SELECT name FROM devices WHERE id = ? AND org_id = ?", (device_id, g.user["org_id"])).fetchone()
+    if not row:
+        return error("Device not found.", 404)
+    db.execute("DELETE FROM commands WHERE device_id = ?", (device_id,))
+    db.execute("DELETE FROM devices WHERE id = ?", (device_id,))      # its token stops working at once
+    db.commit()
+    audit("device_removed", row["name"])
+    return jsonify({"ok": True})
+
+
+@app.post("/api/alerts/<int:row_key>/status")
+@login_required("admin")
+def alert_status(row_key):
+    status_value = (request.get_json(silent=True) or {}).get("status")
+    if status_value not in ("New", "Investigating", "Resolved", "False positive"):
+        return error("Invalid status.", 400)
+    db = get_db()
+    cursor = db.execute("UPDATE security_events SET status = ? WHERE id = ? AND org_id = ?",
+                        (status_value, row_key, g.user["org_id"]))
+    db.commit()
+    if cursor.rowcount == 0:
+        return error("Alert not found.", 404)
+    audit("alert_" + status_value.lower().replace(" ", "_"), str(row_key))
+    return jsonify({"ok": True})
+
+
+@app.get("/api/blocks")
+@login_required()
+def list_blocks():
+    org, db = g.user["org_id"], get_db()
+    expire_blocks(org)
+    out = []
+    for r in db.execute("SELECT * FROM blocks WHERE org_id = ? ORDER BY id DESC LIMIT 50", (org,)).fetchall():
+        counts = {s_: n for s_, n in db.execute(
+            "SELECT status, COUNT(*) FROM commands WHERE block_id = ? AND action = 'block' GROUP BY status", (r["id"],))}
+        out.append({"id": r["id"], "ip": r["ip"], "reason": r["reason"], "created_at": r["created_at"],
+                    "expires_at": r["expires_at"], "status": r["status"], "enforced": counts.get("done", 0),
+                    "failed": counts.get("failed", 0),
+                    "total": sum(n for k, n in counts.items() if k != "cancelled")})
+    return jsonify(out)
+
+
+@app.post("/api/blocks")
+@login_required("admin")
+def create_block():
+    lock = locked("ip_block")
+    if lock:
+        return lock
+    data = request.get_json(silent=True) or {}
+    org, db = g.user["org_id"], get_db()
+    ip = clean_ip(data.get("ip", ""))
+    if not ip:
+        return error("That is not a valid IP address.", 400)
+    problem = block_problem(ip, org)
+    if problem:
+        return error(problem, 400)
+    try:
+        hours = int(data.get("hours", 24))
+    except (TypeError, ValueError):
+        hours = 0
+    if not 1 <= hours <= 720:
+        return error("Choose a block time between 1 hour and 30 days.", 400)
+    if db.execute("SELECT 1 FROM blocks WHERE org_id = ? AND ip = ? AND status = 'active'", (org, ip)).fetchone():
+        return error("That address is already blocked.", 409)
+    if db.execute("SELECT COUNT(*) FROM devices WHERE org_id = ?", (org,)).fetchone()[0] == 0:
+        return error("No laptop is connected yet, so nothing could enforce this block. Connect a laptop first.", 409)
+    try:
+        event_key = int(data.get("event_key")) if data.get("event_key") else None
+    except (TypeError, ValueError):
+        event_key = None
+    cursor = db.execute("INSERT INTO blocks (org_id,ip,reason,created_by,created_at,expires_at,event_id) VALUES (?,?,?,?,?,?,?)",
+                        (org, ip, str(data.get("reason", ""))[:200], g.user["id"], iso(utcnow()),
+                         iso(utcnow() + timedelta(hours=hours)), event_key))
+    count = queue_commands(org, cursor.lastrowid, ip, "block")
+    if event_key:
+        db.execute("UPDATE security_events SET status = 'Blocked' WHERE id = ? AND org_id = ?", (event_key, org))
+    db.commit()
+    audit("block_created", f"{ip} for {hours}h on {count} device(s)")
+    return jsonify({"block_id": cursor.lastrowid, "devices": count}), 201
+
+
+@app.post("/api/blocks/<int:block_id>/remove")
+@login_required("admin")
+def remove_block(block_id):
+    block = get_db().execute("SELECT * FROM blocks WHERE id = ? AND org_id = ?", (block_id, g.user["org_id"])).fetchone()
+    if not block or block["status"] != "active":
+        return error("That block is not active.", 404)
+    lift_block(block, "removed")
+    audit("block_removed", block["ip"])
+    return jsonify({"ok": True})
+
+
+# ---- the agent running on each laptop (authenticated by its own token, not a browser session)
+def agent_device():
+    header = request.headers.get("Authorization", "")
+    token = header[7:] if header.startswith("Bearer ") else ""
+    if not token:
+        return None
+    return get_db().execute("SELECT * FROM devices WHERE token_hash = ?", (sha(token),)).fetchone()
+
+
+@app.post("/api/agent/enroll")
+def agent_enroll():
+    data = request.get_json(silent=True) or {}
+    if too_many("enroll-ip:" + (request.remote_addr or "?"), 100, 900):
+        return error("Too many attempts. Try again later.", 429)
+    db = get_db()
+    row = db.execute("SELECT * FROM enroll_keys WHERE key_hash = ? AND used = 0", (sha(str(data.get("key", ""))[:100]),)).fetchone()
+    if not row or datetime.fromisoformat(row["expires_at"]) < utcnow():
+        return error("That key is invalid, already used or expired. Create a new one in the dashboard.", 403)
+    token = "mtd_" + secrets.token_urlsafe(32)
+    name = str(data.get("name", "")).strip()[:100] or "Unnamed device"
+    device_id = db.execute("INSERT INTO devices (org_id,name,token_hash,os,ip,enrolled_at,last_seen) VALUES (?,?,?,?,?,?,?)",
+                           (row["org_id"], name, sha(token), str(data.get("os", ""))[:120],
+                            request.remote_addr, iso(utcnow()), iso(utcnow()))).lastrowid
+    db.execute("UPDATE enroll_keys SET used = 1 WHERE id = ?", (row["id"],))
+    for block in db.execute("SELECT id, ip FROM blocks WHERE org_id = ? AND status = 'active'", (row["org_id"],)).fetchall():
+        db.execute("INSERT INTO commands (org_id,device_id,block_id,action,ip,created_at) VALUES (?,?,?,'block',?,?)",
+                   (row["org_id"], device_id, block["id"], block["ip"], iso(utcnow())))    # new laptop gets existing blocks
+    db.commit()
+    audit("device_enrolled", name, row["created_by"])
+    return jsonify({"token": token, "device_id": device_id, "interval": AGENT_INTERVAL})
+
+
+@app.post("/api/agent/heartbeat")
+def agent_heartbeat():
+    device = agent_device()
+    if not device:
+        return error("Unknown or removed device.", 401)
+    data = request.get_json(silent=True) or {}
+
+    def percent(key):
+        try:
+            return max(0.0, min(100.0, float(data.get(key) or 0)))
+        except (TypeError, ValueError):
+            return 0.0
+
+    db = get_db()
+    name = str(data.get("name", "")).strip()[:100] or device["name"]
+    db.execute("UPDATE devices SET name=?, os=?, ip=?, cpu=?, memory=?, disk=?, agent_version=?, last_seen=? WHERE id=?",
+               (name, str(data.get("os", ""))[:120], clean_ip(data.get("ip", "")) or request.remote_addr,
+                percent("cpu"), percent("memory"), percent("disk"), str(data.get("version", ""))[:20],
+                iso(utcnow()), device["id"]))
+    posture = data.get("posture")
+    if isinstance(posture, dict):
+        text = json.dumps(posture, separators=(",", ":"))
+        if len(text) <= 4000:
+            db.execute("UPDATE devices SET posture = ? WHERE id = ?", (text, device["id"]))
+    for alert in (data.get("alerts") or [])[:20]:
+        if not isinstance(alert, dict):
+            continue
+        severity = alert.get("severity") if alert.get("severity") in ("Low", "Medium", "High") else "Low"
+        cursor = db.execute(
+            "INSERT INTO security_events (event_id,event_type,device,severity,status,description,timestamp,org_id,source_ip,device_id) "
+            "VALUES ('PENDING',?,?,?,'New',?,?,?,?,?)",
+            (str(alert.get("type", "Security alert"))[:100], name, severity, str(alert.get("description", ""))[:500],
+             datetime.now().isoformat(), device["org_id"], clean_ip(alert.get("source_ip", "")), device["id"]))
+        db.execute("UPDATE security_events SET event_id = ? WHERE id = ?", (f"EVT-{cursor.lastrowid:03d}", cursor.lastrowid))
+    db.commit()
+    expire_blocks(device["org_id"])
+    autopilot.run(db, device["org_id"], device["id"])        # fixes problems by itself; queued orders go out below
+    # an order that waited more than 10 minutes (the laptop was offline) is dropped, never run late
+    db.execute("UPDATE commands SET status = 'cancelled' WHERE device_id = ? AND status = 'pending' "
+               "AND action NOT IN ('block','unblock') AND created_at < ?", (device["id"], iso(utcnow() - timedelta(minutes=10))))
+    pending = db.execute("SELECT id, action, ip, param FROM commands WHERE device_id = ? AND status = 'pending' ORDER BY id LIMIT 20",
+                         (device["id"],)).fetchall()
+    for command in pending:
+        db.execute("UPDATE commands SET status = 'sent' WHERE id = ?", (command["id"],))
+    db.commit()
+    return jsonify({"commands": [dict(c) for c in pending], "interval": AGENT_INTERVAL})
+
+
+@app.post("/api/agent/ack")
+def agent_ack():
+    device = agent_device()
+    if not device:
+        return error("Unknown or removed device.", 401)
+    db = get_db()
+    for result in ((request.get_json(silent=True) or {}).get("results") or [])[:50]:
+        if isinstance(result, dict) and isinstance(result.get("id"), int):
+            db.execute("UPDATE commands SET status = ?, result = ?, done_at = ? WHERE id = ? AND device_id = ?",
+                       ("done" if result.get("ok") else "failed", str(result.get("message", ""))[:300],
+                        iso(utcnow()), result["id"], device["id"]))
+    db.commit()
+    return jsonify({"ok": True})
+
+
+@app.get("/download/mellowtech_agent.py")
+def download_agent():
+    return send_from_directory(ROOT / "agent", "mellowtech_agent.py", as_attachment=True)
+
+
+@app.get("/download/MellowTechAgent.exe")
+def download_agent_exe():                      # copy the built MellowTechAgent.exe into the agent folder to offer it here
+    if not (ROOT / "agent" / "MellowTechAgent.exe").is_file():
+        abort(404)
+    return send_from_directory(ROOT / "agent", "MellowTechAgent.exe", as_attachment=True)
+
+
+# ---------------------------------------------------------------- account requests (MellowTech administrators)
+@app.get("/api/requests")
+@login_required("platform_admin")
+def list_requests():
+    rows = get_db().execute(
+        "SELECT u.id, u.name, u.email, u.email_verified, u.approval, u.created_at, u.decided_at, u.decision_note, "
+        "o.name AS company FROM users u JOIN organisations o ON o.id = u.org_id "
+        "WHERE o.is_platform = 0 AND u.email_verified = 1 AND (u.approval != 'approved' OR u.decided_at IS NOT NULL) "   # only people who confirmed their email
+        "ORDER BY (u.approval = 'pending') DESC, COALESCE(u.decided_at, u.created_at) DESC LIMIT 100").fetchall()
+    items = [{"id": r["id"], "company": r["company"], "name": r["name"], "email": r["email"],
+              "email_confirmed": bool(r["email_verified"]), "status": r["approval"], "requested_at": r["created_at"],
+              "decided_at": r["decided_at"], "note": r["decision_note"]} for r in rows]
+    return jsonify({"pending": sum(1 for i in items if i["status"] == "pending"), "requests": items})
+
+
+def decide_request(user_id, decision):
+    db = get_db()
+    row = db.execute("SELECT u.*, o.is_platform FROM users u JOIN organisations o ON o.id = u.org_id WHERE u.id = ?",
+                     (user_id,)).fetchone()
+    if not row or row["is_platform"]:
+        return error("Request not found.", 404)
+    if row["approval"] != "pending":
+        return error("That request has already been decided.", 409)
+    if decision == "approved" and not row["email_verified"]:
+        return error("This person has not confirmed their email yet, so they cannot be approved.", 409)
+    note = str((request.get_json(silent=True) or {}).get("note", "")).strip()[:200]
+    db.execute("UPDATE users SET approval = ?, decided_at = ?, decided_by = ?, decision_note = ? WHERE id = ?",
+               (decision, iso(utcnow()), g.user["id"], note or None, user_id))
+    db.commit()
+    audit("request_" + decision, row["email"])
+    if decision == "approved":
+        send_email(row["email"], "Your MellowTech account is approved",
+                   f"Hello {row['name']},\n\nYour MellowTech account has been approved. You can sign in now:\n{BASE_URL}/login.html\n")
+    else:
+        send_email(row["email"], "About your MellowTech account request",
+                   f"Hello {row['name']},\n\nWe could not approve your account request." +
+                   (f"\n\nReason: {note}" if note else "") + "\n\nIf you think this is a mistake, please contact MellowTech.\n")
+    return jsonify({"ok": True})
+
+
+@app.post("/api/requests/<int:user_id>/approve")
+@login_required("platform_admin")
+def approve_request(user_id):
+    return decide_request(user_id, "approved")
+
+
+@app.post("/api/requests/<int:user_id>/reject")
+@login_required("platform_admin")
+def reject_request(user_id):
+    return decide_request(user_id, "rejected")
+
+
+# ---------------------------------------------------------------- command line and start
+def create_user_cli(role):
+    if role not in ("admin", "viewer"):
+        sys.exit("Role must be admin or viewer.")
+    email = input("Email: ").strip().lower()
+    name = input("Name: ").strip() or email
+    password = getpass.getpass("Password (at least 10 characters): ")
+    if password != getpass.getpass("Repeat password: "):
+        sys.exit("The passwords do not match.")
+    problem = password_problem(password)
+    if problem or "@" not in email:
+        sys.exit(problem or "That does not look like an email address.")
+    db = sqlite3.connect(DATABASE)
+    try:
+        db.execute("INSERT INTO users (email,name,password_hash,role,created_at,org_id) VALUES (?,?,?,?,?,"
+                   "(SELECT id FROM organisations WHERE is_platform = 1 ORDER BY id LIMIT 1))",
+                   (email, name, hash_password(password), role, iso(utcnow())))
+        db.commit()
+    except sqlite3.IntegrityError:
+        sys.exit("A user with that email already exists.")
+    print(f"Created {role}: {email}")
+
+
+def current_user_id():
+    return g.user["id"] if hasattr(g, "user") else session.get("uid")
+
+
+def current_org_id():
+    return g.user["org_id"]
+
+
+# ---------------------------------------------------------------- paid features (locked until the plan is paid for)
+FEATURE_PLANS = {      # feature: (plan that unlocks it, name shown to customers). MellowTech staff are never locked.
+    "document_scan":  ("starter",  "Document Scanner"),
+    "ip_block":       ("starter",  "IP address blocking"),
+    "device_command": ("business", "Device isolation, virus scans and USB control"),
+    "autopilot":      ("business", "Autopilot: fixes problems automatically"),
+    "service_request": ("starter", "Security service requests"),
+}
+PLAN_ORDER = {"free": 0, "starter": 1, "business": 2, "enterprise": 3}
+
+
+def current_plan(org_id):
+    org = get_db().execute("SELECT plan, plan_expires FROM organisations WHERE id = ?", (org_id,)).fetchone()
+    plan = org["plan"] if org else "free"
+    if plan != "free" and org["plan_expires"] and org["plan_expires"] < iso(utcnow()):
+        plan = "free"        # paid time has run out
+    return plan
+
+
+def locked(feature):
+    """Returns an error reply when the signed-in company's plan does not include the feature, and logs the attempt."""
+    user = g.user
+    if user["is_platform"]:
+        return None
+    needs, label = FEATURE_PLANS[feature]
+    plan = current_plan(user["org_id"])
+    if PLAN_ORDER.get(plan, 0) >= PLAN_ORDER[needs]:
+        return None
+    audit("feature_locked", f"{user['org_name']} ({user['email']}) tried '{label}' on the {plan} plan; it needs {needs}")
+    return jsonify({"error": f"{label} is included in {needs.title()} or a higher plan. Open Billing & Plans to unlock it.",
+                    "locked": True, "needs": needs}), 402
+
+
+def feature_allowed(org_id, feature):
+    """True when the company's plan includes the feature (MellowTech staff are never locked)."""
+    org = get_db().execute("SELECT is_platform FROM organisations WHERE id = ?", (org_id,)).fetchone()
+    if org and org["is_platform"]:
+        return True
+    needs, _label = FEATURE_PLANS[feature]
+    return PLAN_ORDER.get(current_plan(org_id), 0) >= PLAN_ORDER[needs]
+
+
+@app.get("/api/features")
+@login_required()
+def feature_list():
+    plan = current_plan(g.user["org_id"])
+    rank = PLAN_ORDER.get(plan, 0)
+    staff = bool(g.user["is_platform"])
+    return jsonify({"plan": plan, "features": [
+        {"key": k, "label": label, "needs": need, "unlocked": staff or rank >= PLAN_ORDER[need]}
+        for k, (need, label) in FEATURE_PLANS.items()]})
+
+
+@app.get("/api/locked-log")
+@login_required("platform_admin")
+def locked_log():
+    rows = get_db().execute("SELECT ts, detail FROM audit_log WHERE action = 'feature_locked' "
+                            "ORDER BY id DESC LIMIT 100").fetchall()
+    return jsonify([dict(r) for r in rows])
+
+
+initialize_database()
+scanner.init_scanner(app, DATABASE, dict(
+    get_db=get_db, error=error, iso=iso, utcnow=utcnow,
+    login_required=login_required, audit=audit, too_many=too_many))
+payfast.init_payfast(app, dict(
+    get_db=get_db, error=error, iso=iso, utcnow=utcnow,
+    login_required=login_required, audit=audit, too_many=too_many,
+    base_url=BASE_URL, plans=PLANS,
+    current_user_id=current_user_id, current_org_id=current_org_id))
+docscan.init_docscan(app, dict(
+    get_db=get_db, error=error, iso=iso, utcnow=utcnow,
+    login_required=login_required, audit=audit, too_many=too_many, locked=locked))
+autopilot.init_autopilot(app, dict(
+    get_db=get_db, error=error, iso=iso, utcnow=utcnow, login_required=login_required, audit=audit,
+    locked=locked, feature_allowed=feature_allowed, block_problem=block_problem, queue_commands=queue_commands))
+services.init_services(app, dict(
+    get_db=get_db, error=error, iso=iso, utcnow=utcnow,
+    login_required=login_required, audit=audit, too_many=too_many, locked=locked, notify_staff=notify_staff))
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "create-user":
+        create_user_cli(sys.argv[2] if len(sys.argv) > 2 else "admin")
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "test-email":
+        target = sys.argv[2] if len(sys.argv) > 2 else input("Send the test email to: ").strip()
+        if not os.environ.get("SMTP_HOST"):
+            print("Email is not set up (SMTP_HOST is empty), so the message below is only printed here, not sent.")
+        try:
+            deliver_email(target, "MellowTech test email", "If you can read this, MellowTech can send email.")
+        except Exception as exc:
+            sys.exit(f"Could not send: {exc}")
+        print("Done. If email is set up, check the inbox (and the spam folder) of", target)
+        sys.exit(0)
+
+    with sqlite3.connect(DATABASE) as probe:
+        has_users = probe.execute("SELECT COUNT(*) FROM users").fetchone()[0] > 0
+    print(f"\nMellowTech {VERSION} is running at {BASE_URL}/   (debug {'ON' if DEBUG else 'off'})")
+    print(f"Listening on {HOST}:{PORT}" + ("  (other computers on your network can connect)" if HOST == "0.0.0.0" else ""))
+    print(f"Serving the website files from: {ROOT}")
+    if os.environ.get("SMTP_HOST"):
+        print(f"Email: sending through {os.environ['SMTP_HOST']}:{os.environ.get('SMTP_PORT', '587')}")
+    elif local_url(BASE_URL):
+        print("Email: NOT set up. Confirmation and reset links are printed in this window instead.")
+    else:
+        print("Email: NOT set up, so sign-up is switched off. Fill in backend/settings.env and restart.")
+    if not has_users:
+        print("No users yet. In a second terminal run:  python app.py create-user admin")
+    app.run(host=HOST, port=PORT, debug=DEBUG)

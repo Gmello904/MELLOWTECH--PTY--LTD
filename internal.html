@@ -1,0 +1,669 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MellowTech Internal Portal</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=Sora:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+    :root {
+        --ink: #050f1b; --deep: #08192b; --panel: #0c2036; --raise: #12304f;
+        --line: rgba(130, 175, 215, .15); --text: #e4eef8; --muted: #8aa0b6;
+        --signal: #1fd6a4; --cyan: #58c7ff; --coral: #ff5d6c; --amber: #ffb84a;
+        --display: "Sora", "Segoe UI", system-ui, sans-serif;
+        --body: "IBM Plex Sans", "Segoe UI", system-ui, sans-serif;
+    }
+    * { box-sizing: border-box; }
+    html { color-scheme: dark; }
+    body {
+        margin: 0; min-height: 100vh; display: flex; color: var(--text); font-family: var(--body); font-size: 15px;
+        background: radial-gradient(900px 500px at 12% -8%, rgba(31, 214, 164, .10), transparent 60%),
+                    radial-gradient(800px 600px at 100% 0%, rgba(88, 199, 255, .07), transparent 55%), var(--ink);
+    }
+    :focus-visible { outline: 2px solid var(--cyan); outline-offset: 2px; }
+
+    /* ---------- sidebar ---------- */
+    aside { width: 262px; flex-shrink: 0; padding: 26px 16px 22px; display: flex; flex-direction: column;
+            background: linear-gradient(180deg, rgba(12, 32, 54, .92), rgba(5, 15, 27, .96)); border-right: 1px solid var(--line);
+            position: sticky; top: 0; height: 100vh; }
+    .brand { padding: 0 12px 26px; }
+    .brand b { display: block; font-family: var(--display); font-weight: 700; font-size: 21px; letter-spacing: .14em; }
+    .brand span { color: var(--signal); font-size: 13px; }
+    nav button { display: flex; align-items: center; gap: 13px; width: 100%; border: 0; background: transparent; color: var(--muted);
+                 padding: 12px 14px; border-radius: 12px; font: 500 15px var(--body); cursor: pointer; margin-bottom: 4px; text-align: left; transition: background .15s, color .15s; }
+    nav button svg { width: 20px; height: 20px; flex-shrink: 0; stroke: currentColor; fill: none; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+    nav button:hover { background: rgba(255, 255, 255, .05); color: var(--text); }
+    nav button.on { color: #fff; background: linear-gradient(90deg, rgba(31, 214, 164, .20), rgba(31, 214, 164, .02)); box-shadow: inset 3px 0 0 var(--signal); }
+    nav button.on svg { stroke: var(--signal); }
+    .who { margin-top: auto; padding: 16px 12px 0; border-top: 1px solid var(--line); display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+    .who .avatar { width: 40px; height: 40px; font-size: 16px; }
+    .who b { display: block; font-size: 14px; }
+    .who span { color: var(--signal); font-size: 12.5px; }
+    .who .btn { margin-left: auto; padding: 7px 12px; }
+
+    /* ---------- content ---------- */
+    .content { flex: 1; min-width: 0; padding: 34px 40px 70px; max-width: 1500px; }
+    .head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 26px; }
+    h2 { margin: 0; font: 600 32px/1.15 var(--display); letter-spacing: -.01em; }
+    .sub { color: var(--muted); margin: 8px 0 0; max-width: 62ch; line-height: 1.5; }
+    h3 { margin: 34px 0 14px; font: 600 18px var(--display); }
+    .msg { padding: 12px 16px; border-radius: 12px; margin-bottom: 18px; background: rgba(88, 199, 255, .12); border: 1px solid rgba(88, 199, 255, .3); }
+    .msg.err { background: rgba(255, 93, 108, .12); border-color: rgba(255, 93, 108, .4); color: #ffc2c8; }
+    .msg.ok { background: rgba(31, 214, 164, .12); border-color: rgba(31, 214, 164, .4); color: #b6f5e2; }
+
+    .panel { background: linear-gradient(180deg, rgba(255, 255, 255, .045), rgba(255, 255, 255, .012)); border: 1px solid var(--line);
+             border-radius: 18px; padding: 22px; overflow-x: auto; }
+    .panel h4 { margin: 0 0 4px; font: 600 16px var(--display); }
+    .panel .note { color: var(--muted); font-size: 13.5px; margin: 0; }
+
+    /* ---------- command centre ---------- */
+    .hero { display: grid; grid-template-columns: minmax(0, 1.55fr) minmax(0, 1fr); gap: 20px; }
+    .radar-wrap { border-radius: 26px; padding: 26px 26px 20px; position: relative; overflow: hidden;
+                  background: radial-gradient(circle at 50% 46%, rgba(31, 214, 164, .12), transparent 62%), linear-gradient(180deg, #0a2540, #071a2e);
+                  border: 1px solid rgba(31, 214, 164, .22); }
+    .radar-wrap .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; flex-wrap: wrap; }
+    .radar { display: block; width: 100%; max-width: 470px; margin: 6px auto 0; }
+    .radar .sweep { transform-box: view-box; transform-origin: 50% 50%; animation: sweep 9s linear infinite; }
+    .radar .alert-ring { transform-box: fill-box; transform-origin: center; animation: ping 2.4s ease-out infinite; }
+    @keyframes sweep { to { transform: rotate(360deg); } }
+    @keyframes ping { from { transform: scale(1); opacity: .9; } to { transform: scale(3.2); opacity: 0; } }
+    .legend { display: flex; gap: 20px; flex-wrap: wrap; justify-content: center; color: var(--muted); font-size: 13px; margin-top: 8px; }
+    .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 7px; vertical-align: -1px; }
+    .side { display: grid; gap: 20px; align-content: start; }
+    .status-big { display: flex; align-items: center; gap: 14px; margin: 8px 0 4px; }
+    .status-big .dot { width: 16px; height: 16px; border-radius: 50%; background: var(--signal); box-shadow: 0 0 0 6px rgba(31, 214, 164, .18), 0 0 24px var(--signal); }
+    .status-big b { font: 700 40px var(--display); letter-spacing: -.02em; }
+    .attn { list-style: none; margin: 14px 0 0; padding: 0; }
+    .attn li { display: flex; align-items: center; gap: 12px; padding: 11px 0; border-top: 1px solid var(--line); }
+    .attn li:first-child { border-top: 0; }
+    .attn .n { min-width: 38px; text-align: center; font: 700 17px var(--display); padding: 5px 0; border-radius: 10px; background: rgba(255, 255, 255, .06); color: var(--muted); }
+    .attn .hot .n { background: rgba(255, 93, 108, .18); color: var(--coral); }
+    .attn .warm .n { background: rgba(255, 184, 74, .16); color: var(--amber); }
+    .attn .t { flex: 1; }
+    .attn small { color: var(--muted); display: block; font-size: 12.5px; }
+
+    .trio { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; margin-top: 20px; }
+    .stat b { display: block; font: 700 46px/1 var(--display); letter-spacing: -.03em; margin: 14px 0 6px; }
+    .stat p { margin: 0; color: var(--muted); }
+    .meter { height: 7px; border-radius: 99px; background: rgba(255, 255, 255, .08); margin-top: 16px; overflow: hidden; }
+    .meter i { display: block; height: 100%; border-radius: 99px; background: linear-gradient(90deg, var(--signal), var(--cyan)); }
+
+    .duo { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr); gap: 20px; margin-top: 20px; }
+    .money b { font: 700 44px/1 var(--display); letter-spacing: -.03em; display: block; margin: 14px 0 4px; }
+    .money .rows { margin-top: 20px; }
+    .money .rows div { display: flex; justify-content: space-between; align-items: center; padding: 11px 0; border-top: 1px solid var(--line); }
+    .money .rows span { color: var(--muted); }
+    .feed { list-style: none; margin: 14px 0 0; padding: 0 0 0 18px; border-left: 2px solid var(--line); }
+    .feed li { position: relative; padding: 0 0 16px 18px; }
+    .feed li::before { content: ""; position: absolute; left: -25px; top: 5px; width: 10px; height: 10px; border-radius: 50%; background: var(--deep); border: 2px solid var(--signal); }
+    .feed li.bad::before { border-color: var(--coral); }
+    .feed b { font-weight: 600; }
+    .feed small { display: block; color: var(--muted); margin-top: 2px; word-break: break-word; }
+
+    /* ---------- tables, forms, buttons ---------- */
+    table { border-collapse: collapse; width: 100%; font-size: 14.5px; }
+    th, td { text-align: left; padding: 13px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; font-variant-numeric: tabular-nums; }
+    th { color: var(--muted); font-weight: 500; font-size: 13px; }
+    tr:last-child td { border-bottom: 0; }
+    tr.click { cursor: pointer; transition: background .12s; }
+    tr.click:hover td { background: rgba(31, 214, 164, .07); }
+    .who-cell { display: flex; align-items: center; gap: 12px; font-weight: 500; }
+    .avatar { width: 36px; height: 36px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font: 600 14px var(--display); color: #fff; flex-shrink: 0; }
+    .badge { display: inline-block; padding: 3px 11px; border-radius: 99px; font-size: 12.5px; font-weight: 500; background: rgba(255, 255, 255, .08); color: var(--muted); }
+    .badge.green { background: rgba(31, 214, 164, .15); color: var(--signal); }
+    .badge.red { background: rgba(255, 93, 108, .16); color: var(--coral); }
+    .badge.blue { background: rgba(88, 199, 255, .15); color: var(--cyan); }
+    .bar { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-bottom: 18px; }
+    .btn { border: 1px solid var(--line); background: rgba(255, 255, 255, .06); color: var(--text); border-radius: 10px; padding: 9px 16px; font: 500 14px var(--body); cursor: pointer; transition: background .15s, transform .1s; }
+    .btn:hover { background: rgba(255, 255, 255, .12); }
+    .btn:active { transform: translateY(1px); }
+    .btn.primary { background: var(--signal); border-color: var(--signal); color: #04281d; font-weight: 600; }
+    .btn.primary:hover { background: #4ae6bb; }
+    .btn.danger { background: rgba(255, 93, 108, .14); border-color: rgba(255, 93, 108, .5); color: #ffb3bb; }
+    .btn.danger:hover { background: rgba(255, 93, 108, .26); }
+    input, select { background: rgba(255, 255, 255, .06); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; font: 400 14px var(--body); }
+    select option { background: var(--panel); color: var(--text); }
+    input::placeholder { color: var(--muted); }
+    .search { min-width: 300px; padding-left: 14px; }
+    .detail-head { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin: 18px 0 8px; }
+    .detail-head .avatar { width: 64px; height: 64px; font-size: 26px; }
+    .strip { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 14px; margin: 22px 0 6px; }
+    .strip .panel { padding: 16px 18px; }
+    .strip small { color: var(--muted); display: block; }
+    .strip b { font: 700 24px var(--display); display: block; margin-top: 6px; }
+    .empty { color: var(--muted); padding: 10px 4px; }
+
+    .pay-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 20px; }
+    .pay-card { display: flex; flex-direction: column; gap: 14px; border-left: 4px solid var(--signal); }
+    .pay-card.off { border-left-color: var(--coral); }
+    .pay-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+    .pay-state { margin: 0; color: var(--muted); }
+    .pay-card .btn { align-self: flex-start; }
+    .help-list { display: grid; gap: 14px; }
+    .help-card { border-left: 4px solid var(--coral); }
+    .help-card.done { border-left-color: var(--signal); opacity: .75; }
+    .help-top { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+    .help-msg { white-space: pre-wrap; margin: 8px 0 14px; line-height: 1.55; }
+    .help-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+    @media (max-width: 1100px) { .hero, .duo { grid-template-columns: 1fr; } .trio { grid-template-columns: 1fr; } }
+    @media (max-width: 800px) {
+        body { flex-direction: column; }
+        aside { width: 100%; height: auto; position: static; padding: 16px; border-right: 0; border-bottom: 1px solid var(--line); }
+        .brand { padding-bottom: 12px; } nav { display: flex; gap: 6px; overflow-x: auto; } nav button { width: auto; white-space: nowrap; }
+        .who { margin-top: 12px; } .content { padding: 22px 16px 50px; } h2 { font-size: 26px; } .search { min-width: 0; width: 100%; }
+    }
+    @media (prefers-reduced-motion: reduce) { .radar .sweep, .radar .alert-ring { animation: none; } }
+</style>
+</head>
+<body>
+<aside>
+    <div class="brand"><b>MELLOWTECH</b><span>Internal portal</span></div>
+    <nav id="tabs" aria-label="Main"></nav>
+    <div class="who">
+        <span class="avatar" id="who-avatar" style="background:#15866a"></span>
+        <div><b id="who-name"></b><span id="who-level"></span></div>
+        <button class="btn" id="logout">Sign out</button>
+    </div>
+</aside>
+<main class="content"><div id="msg" role="status"></div><div id="view">Loading...</div></main>
+<script>
+(function () {
+    var csrf = "", me = null, perms = {}, timer = null, firstDraw = true;
+    var SVGNS = "http://www.w3.org/2000/svg";
+
+    var ICONS = {
+        centre: '<path d="M4 13a8 8 0 1 1 16 0"/><path d="M12 13l4-4"/><circle cx="12" cy="13" r="1.4"/><path d="M4 18h16"/>',
+        customers: '<path d="M3 20V8l6-3v15"/><path d="M9 20V10l6-2v12"/><path d="M15 20V6l6 2v12"/>',
+        staff: '<circle cx="9" cy="8" r="3.2"/><path d="M3 20c.5-3.6 3-5.5 6-5.5s5.5 1.9 6 5.5"/><path d="M16 5.2a3 3 0 0 1 0 5.6M18 14.8c1.7.7 2.8 2.4 3 5.2"/>',
+        audit: '<path d="M6 3h9l4 4v14H6z"/><path d="M14 3v5h5M9 13h7M9 17h7"/>',
+        payments: '<rect x="3" y="6" width="18" height="13" rx="2"/><path d="M3 10h18M7 15h4"/>',
+        help: '<path d="M4 5h16v11H9l-5 4z"/><path d="M8 9h8M8 12h5"/>'
+    };
+
+    function api(path, body) {
+        var options = { credentials: "same-origin", headers: { "Content-Type": "application/json" } };
+        if (body !== undefined) {
+            options.method = "POST";
+            options.headers["X-CSRF-Token"] = csrf;
+            options.body = JSON.stringify(body);
+        }
+        return fetch(path, options).then(function (r) {
+            return r.json().catch(function () { return {}; }).then(function (d) {
+                if (!r.ok) { throw new Error(d.error || "Something went wrong."); }
+                return d;
+            });
+        });
+    }
+    function el(tag, text, cls) {
+        var e = document.createElement(tag);
+        if (text !== undefined && text !== null) { e.textContent = text; }
+        if (cls) { e.className = cls; }
+        return e;
+    }
+    function svg(tag, attrs, parent) {
+        var e = document.createElementNS(SVGNS, tag);
+        Object.keys(attrs || {}).forEach(function (k) { e.setAttribute(k, attrs[k]); });
+        if (parent) { parent.appendChild(e); }
+        return e;
+    }
+    function say(text, kind) {
+        var box = document.getElementById("msg");
+        box.textContent = "";
+        if (text) { box.appendChild(el("div", text, "msg " + (kind || ""))); }
+    }
+    function when(v) { return v ? new Date(v).toLocaleString() : "-"; }
+    function ago(v) {
+        if (!v) { return "-"; }
+        var s = Math.max(0, (Date.now() - new Date(v).getTime()) / 1000);
+        if (s < 60) { return "just now"; }
+        if (s < 3600) { return Math.floor(s / 60) + " min ago"; }
+        if (s < 86400) { return Math.floor(s / 3600) + " h ago"; }
+        return Math.floor(s / 86400) + " days ago";
+    }
+    function money(v, cur) { return cur + " " + Number(v).toLocaleString("en-ZA", { minimumFractionDigits: 2, maximumFractionDigits: 2 }); }
+    function hash(text) { var h = 0; for (var i = 0; i < text.length; i++) { h = (h * 31 + text.charCodeAt(i)) >>> 0; } return h; }
+    function avatar(name) {
+        var a = el("span", (name || "?").trim().charAt(0).toUpperCase(), "avatar");
+        a.style.background = "hsl(" + (hash(name || "?") % 360) + " 52% 34%)";
+        return a;
+    }
+    function badge(text, kind) { return el("span", text, "badge " + (kind || "")); }
+    function table(headers, rows, onRow) {
+        var t = el("table"), head = el("tr");
+        headers.forEach(function (h) { head.appendChild(el("th", h)); });
+        t.appendChild(head);
+        if (!rows.length) {
+            var empty = el("tr"), cell = el("td", "Nothing here yet.", "empty");
+            cell.colSpan = headers.length; empty.appendChild(cell); t.appendChild(empty);
+        }
+        rows.forEach(function (row, i) {
+            var tr = el("tr", null, onRow ? "click" : "");
+            row.forEach(function (cell) {
+                var td = el("td");
+                if (cell instanceof Node) { td.appendChild(cell); } else { td.textContent = cell === null || cell === undefined || cell === "" ? "-" : cell; }
+                tr.appendChild(td);
+            });
+            if (onRow) { tr.addEventListener("click", function () { onRow(i); }); }
+            t.appendChild(tr);
+        });
+        return t;
+    }
+    function panel(node, cls) { var c = el("div", null, "panel" + (cls ? " " + cls : "")); c.appendChild(node); return c; }
+    function show(nodes) {
+        var view = document.getElementById("view");
+        view.textContent = "";
+        [].concat(nodes).forEach(function (n) { view.appendChild(n); });
+    }
+    function heading(title, sub, right) {
+        var box = el("div", null, "head"), left = el("div");
+        left.appendChild(el("h2", title));
+        if (sub) { left.appendChild(el("p", sub, "sub")); }
+        box.appendChild(left);
+        if (right) { box.appendChild(right); }
+        return box;
+    }
+    function uptime(seconds) {
+        var d = Math.floor(seconds / 86400), h = Math.floor(seconds % 86400 / 3600), m = Math.floor(seconds % 3600 / 60);
+        return (d ? d + " d " : "") + h + " h " + m + " min";
+    }
+    function stopTimer() { if (timer) { clearInterval(timer); timer = null; } }
+    function countUp(node, to) {
+        if (!firstDraw || window.matchMedia("(prefers-reduced-motion: reduce)").matches || !to) { node.textContent = to; return; }
+        var start = performance.now(), dur = 900;
+        (function step(now) {
+            var p = Math.min(1, (now - start) / dur);
+            node.textContent = Math.round(to * (1 - Math.pow(1 - p, 3)));
+            if (p < 1) { requestAnimationFrame(step); }
+        })(start);
+    }
+
+    /* ------------------------------------------------ radar: one dot per customer company */
+    function radar(orgs) {
+        var s = svg("svg", { viewBox: "0 0 400 400", "class": "radar", role: "img", "aria-label": "Radar of customer companies" });
+        var defs = svg("defs", {}, s);
+        var g = svg("linearGradient", { id: "sw", gradientUnits: "userSpaceOnUse", x1: "338", y1: "84", x2: "200", y2: "20" }, defs);
+        svg("stop", { offset: "0", "stop-color": "#1fd6a4", "stop-opacity": ".55" }, g);
+        svg("stop", { offset: "1", "stop-color": "#1fd6a4", "stop-opacity": "0" }, g);
+        [60, 120, 180].forEach(function (r) { svg("circle", { cx: 200, cy: 200, r: r, fill: "none", stroke: "rgba(130,175,215,.22)", "stroke-width": 1 }, s); });
+        svg("circle", { cx: 200, cy: 200, r: 180, fill: "rgba(31,214,164,.03)" }, s);
+        svg("path", { d: "M200 20V380M20 200H380", stroke: "rgba(130,175,215,.14)", "stroke-width": 1 }, s);
+        var sweep = svg("g", { "class": "sweep" }, s);
+        svg("path", { d: "M200 200 L200 20 A180 180 0 0 1 337.9 84.3 Z", fill: "url(#sw)" }, sweep);
+        svg("line", { x1: 200, y1: 200, x2: 337.9, y2: 84.3, stroke: "#1fd6a4", "stroke-width": 1.6, "stroke-opacity": ".8" }, sweep);
+        orgs.forEach(function (o) {
+            var a = ((o.id * 137.508) % 360) * Math.PI / 180, r = 50 + (hash(String(o.id)) % 125);
+            var x = 200 + r * Math.cos(a), y = 200 + r * Math.sin(a);
+            var color = o.suspended ? "#ff5d6c" : (o.plan !== "free" ? "#58c7ff" : "#1fd6a4");
+            if (o.suspended) { svg("circle", { cx: x.toFixed(1), cy: y.toFixed(1), r: 4, fill: "none", stroke: color, "stroke-width": 1.5, "class": "alert-ring" }, s); }
+            var dot = svg("circle", { cx: x.toFixed(1), cy: y.toFixed(1), r: o.plan !== "free" ? 5.5 : 4, fill: color }, s);
+            svg("title", {}, dot).textContent = o.name + (o.suspended ? " (suspended)" : " (" + o.plan + ")");
+        });
+        svg("circle", { cx: 200, cy: 200, r: 9, fill: "#1fd6a4" }, s);
+        svg("circle", { cx: 200, cy: 200, r: 15, fill: "none", stroke: "#1fd6a4", "stroke-opacity": ".5" }, s);
+        return s;
+    }
+
+    /* ------------------------------------------------ Command Centre */
+    function commandCentre() {
+        function draw() {
+            return Promise.all([api("/api/internal/overview"), api("/api/internal/customers").catch(function () { return []; })]).then(function (res) {
+                var o = res[0], orgs = res[1], c = o.customers, p = o.protection, st = o.staff, x = o.security, r = o.revenue;
+
+                /* hero: radar + status */
+                var radarBox = el("div", null, "radar-wrap"), top = el("div", null, "top"), tl = el("div");
+                tl.appendChild(el("h4", "Customer radar")); tl.lastChild.style.cssText = "font:600 18px var(--display);margin:0";
+                tl.appendChild(el("p", c.organisations + " customer companies under protection", "note"));
+                top.appendChild(tl);
+                var refresh = el("button", "Refresh", "btn"); refresh.addEventListener("click", draw);
+                top.appendChild(refresh);
+                radarBox.appendChild(top); radarBox.appendChild(radar(orgs));
+                var legend = el("div", null, "legend");
+                [["#1fd6a4", "Free plan"], ["#58c7ff", "Paid plan"], ["#ff5d6c", "Suspended"]].forEach(function (l) {
+                    var item = el("span"), dot = el("i"); dot.style.background = l[0]; item.appendChild(dot); item.appendChild(document.createTextNode(l[1])); legend.appendChild(item);
+                });
+                radarBox.appendChild(legend);
+                radarBox.appendChild(el("p", "Dot positions are for display only. They do not show where a company is.", "note")).style.cssText = "text-align:center;margin-top:8px;font-size:12.5px";
+
+                var side = el("div", null, "side");
+                var status = el("div", null, "panel");
+                status.appendChild(el("h4", "Platform"));
+                var big = el("div", null, "status-big"); big.appendChild(el("span", null, "dot")); big.appendChild(el("b", "Online"));
+                status.appendChild(big);
+                status.appendChild(el("p", "Version " + o.platform.version + ". Running for " + uptime(o.platform.uptime_seconds) + ". Database " + o.platform.database + ".", "note"));
+                side.appendChild(status);
+
+                var attn = el("div", null, "panel");
+                attn.appendChild(el("h4", "Needs attention"));
+                var list = el("ul", null, "attn");
+                [[p.critical_incidents, "Critical incidents", "High or critical, still open", "hot"],
+                 [x.locked_accounts, "Locked accounts", "Too many wrong passwords", "warm"],
+                 [c.pending_approval, "Waiting for approval", "New customers who confirmed their email", "warm"],
+                 [c.suspended, "Suspended companies", "Signed out and blocked", "warm"],
+                 [x.failed_logins_24h, "Failed sign-ins today", "Last 24 hours", x.failed_logins_24h > 20 ? "hot" : ""]].forEach(function (a) {
+                    var li = el("li", null, a[0] ? a[3] : ""), n = el("span", a[0], "n"), t = el("span", null, "t");
+                    t.appendChild(document.createTextNode(a[1])); t.appendChild(el("small", a[2]));
+                    li.appendChild(n); li.appendChild(t); list.appendChild(li);
+                });
+                attn.appendChild(list); side.appendChild(attn);
+                var hero = el("div", null, "hero"); hero.appendChild(radarBox); hero.appendChild(side);
+
+                /* three big numbers */
+                function stat(title, value, note, ratio) {
+                    var s = el("div", null, "panel stat"); s.appendChild(el("h4", title));
+                    var b = el("b"); countUp(b, value); s.appendChild(b); s.appendChild(el("p", note));
+                    if (ratio !== undefined) { var m = el("div", null, "meter"), i = el("i"); i.style.width = Math.round(ratio * 100) + "%"; m.appendChild(i); s.appendChild(m); }
+                    return s;
+                }
+                var trio = el("div", null, "trio");
+                trio.appendChild(stat("Protected devices", p.devices, p.devices_online + " online right now", p.devices ? p.devices_online / p.devices : 0));
+                trio.appendChild(stat("Open incidents", p.open_incidents, p.critical_incidents + " of them high or critical", p.open_incidents ? p.critical_incidents / p.open_incidents : 0));
+                trio.appendChild(stat("Customer users", c.users, c.paid + " companies on a paid plan", c.organisations ? c.paid / c.organisations : 0));
+
+                /* money + activity */
+                var money_ = el("div", null, "panel money");
+                money_.appendChild(el("h4", "Monthly recurring revenue"));
+                money_.appendChild(el("b", money(r.mrr_usd, "USD")));
+                money_.appendChild(el("p", "About " + money(r.mrr_zar, "R") + " at today's rate", "note"));
+                var rows = el("div", null, "rows");
+                [["Received through PayPal", money(r.paypal_usd, "USD")], ["Received through PayFast", money(r.payfast_zar, "R")], ["Employees signed in", st.active_sessions + " of " + st.employees]].forEach(function (l) {
+                    var d = el("div"); d.appendChild(el("span", l[0])); d.appendChild(el("b", l[1])); d.lastChild.style.fontWeight = "600"; d.lastChild.style.fontSize = "15px"; rows.appendChild(d);
+                });
+                money_.appendChild(rows);
+
+                var feedBox = el("div", null, "panel");
+                feedBox.appendChild(el("h4", "Latest activity"));
+                var feed = el("ul", null, "feed");
+                if (!o.recent.length) { feed.appendChild(el("li", "No activity yet.")); }
+                o.recent.forEach(function (a) {
+                    var li = el("li", null, /failed|denied|blocked|suspended|disabled/.test(a.action) ? "bad" : "");
+                    var b = el("b", a.action.replace(/_/g, " ")); li.appendChild(b);
+                    li.appendChild(document.createTextNode(" by " + a.who + ", " + ago(a.ts)));
+                    if (a.detail) { li.appendChild(el("small", a.detail)); }
+                    feed.appendChild(li);
+                });
+                feedBox.appendChild(feed);
+                var duo = el("div", null, "duo"); duo.appendChild(money_); duo.appendChild(feedBox);
+
+                show([heading("Command Centre", "Everything happening across MellowTech right now. Refreshes every 30 seconds."), hero, trio, duo]);
+                firstDraw = false;
+            }).catch(function (e) { say(e.message, "err"); });
+        }
+        draw();
+        stopTimer();
+        timer = setInterval(function () { if (!document.hidden) { draw(); } }, 30000);
+    }
+
+    /* ------------------------------------------------ Customers */
+    function customers() {
+        return api("/api/internal/customers").then(function (list) {
+            var search = el("input", null, "search"); search.placeholder = "Search company name"; search.setAttribute("aria-label", "Search company name");
+            var holder = el("div");
+            function draw() {
+                var q = search.value.trim().toLowerCase();
+                var rows = list.filter(function (c) { return c.name.toLowerCase().indexOf(q) !== -1; });
+                holder.textContent = "";
+                holder.appendChild(panel(table(["Company", "Status", "Plan", "Plan ends", "Users", "Devices", "Joined"], rows.map(function (c) {
+                    var name = el("span", null, "who-cell"); name.appendChild(avatar(c.name)); name.appendChild(document.createTextNode(c.name));
+                    return [name, c.suspended ? badge("Suspended", "red") : badge("Active", "green"), badge(c.plan, c.plan === "free" ? "" : "blue"), c.plan_expires ? when(c.plan_expires) : "No end date", c.users, c.devices, when(c.created_at)];
+                }), function (i) { customerDetail(rows[i].id); })));
+            }
+            search.addEventListener("input", draw);
+            var bar = el("div", null, "bar"); bar.appendChild(search);
+            show([heading("Customers", list.length + " companies. Select one to see its users, devices, incidents and payments."), bar, holder]);
+            draw();
+        });
+    }
+
+    function customerDetail(id) {
+        stopTimer();
+        api("/api/internal/customers/" + id).then(function (d) {
+            var org = d.org, parts = [];
+            var back = el("button", "Back to customers", "btn");
+            back.addEventListener("click", function () { say(""); customers().catch(function (e) { say(e.message, "err"); }); });
+            parts.push(back);
+
+            var head = el("div", null, "detail-head");
+            head.appendChild(avatar(org.name));
+            var titles = el("div"); titles.appendChild(el("h2", org.name));
+            var line = el("div", null, "bar"); line.style.margin = "10px 0 0";
+            line.appendChild(org.suspended ? badge("Suspended", "red") : badge("Active", "green"));
+            line.appendChild(badge(org.plan + " plan", org.plan === "free" ? "" : "blue"));
+            titles.appendChild(line); head.appendChild(titles);
+            parts.push(head);
+            if (org.suspended) { var s = el("div", "Suspended: " + (org.suspended_reason || "no reason recorded"), "msg err"); s.style.marginTop = "14px"; parts.push(s); }
+
+            var openCount = d.incidents.filter(function (i) { return ["New", "Investigating", "Open"].indexOf(i.status) !== -1; }).length;
+            var strip = el("div", null, "strip");
+            [["Users", d.users.length], ["Devices", d.devices.length + " (" + d.devices.filter(function (v) { return v.online; }).length + " online)"],
+             ["Open incidents", openCount], ["Plan ends", org.plan_expires ? new Date(org.plan_expires).toLocaleDateString() : "No end date"], ["Joined", new Date(org.created_at).toLocaleDateString()]].forEach(function (k) {
+                var p = el("div", null, "panel"); p.appendChild(el("small", k[0])); p.appendChild(el("b", String(k[1]))); strip.appendChild(p);
+            });
+            parts.push(strip);
+
+            var actions = el("div", null, "bar"); actions.style.marginTop = "20px";
+            if (perms.suspend_accounts) {
+                var susp = el("button", org.suspended ? "Reactivate company" : "Suspend company", org.suspended ? "btn primary" : "btn danger");
+                susp.addEventListener("click", function () {
+                    var reason = "";
+                    if (!org.suspended) {
+                        reason = window.prompt("Why is this company being suspended? The reason is saved in the audit log.", "");
+                        if (reason === null) { return; }
+                    } else if (!window.confirm("Reactivate " + org.name + "?")) { return; }
+                    api("/api/internal/customers/" + id + "/suspend", { suspend: !org.suspended, reason: reason })
+                        .then(function () { say(org.name + (org.suspended ? " is active again." : " is suspended and signed out."), "ok"); customerDetail(id); })
+                        .catch(function (e) { say(e.message, "err"); });
+                });
+                actions.appendChild(susp);
+                var out = el("button", "Sign everyone out", "btn");
+                out.addEventListener("click", function () {
+                    if (!window.confirm("Sign out every user of " + org.name + "?")) { return; }
+                    api("/api/internal/customers/" + id + "/signout", {})
+                        .then(function () { say("Everyone at " + org.name + " has been signed out.", "ok"); })
+                        .catch(function (e) { say(e.message, "err"); });
+                });
+                actions.appendChild(out);
+                var reset = el("button", "Reset security rules", "btn");
+                reset.addEventListener("click", function () {
+                    if (!window.confirm("Clear the idle sign-out time and the allowed IP list for " + org.name + "? Use this if they locked themselves out.")) { return; }
+                    api("/api/internal/customers/" + id + "/policy-reset", {})
+                        .then(function () { say("Security rules for " + org.name + " were reset.", "ok"); })
+                        .catch(function (e) { say(e.message, "err"); });
+                });
+                actions.appendChild(reset);
+            }
+            if (perms.manage_subscriptions === true) {
+                var plan = el("select"); plan.setAttribute("aria-label", "Plan");
+                ["free", "starter", "business", "enterprise"].forEach(function (p) { var o = el("option", p); o.value = p; if (p === org.plan) { o.selected = true; } plan.appendChild(o); });
+                var days = el("input"); days.type = "number"; days.min = "1"; days.max = "366"; days.value = "30"; days.style.width = "84px"; days.setAttribute("aria-label", "Days");
+                var apply = el("button", "Set plan", "btn primary");
+                apply.addEventListener("click", function () {
+                    if (!window.confirm("Set " + org.name + " to " + plan.value + (plan.value === "free" ? "" : " for " + days.value + " days") + "?")) { return; }
+                    api("/api/internal/customers/" + id + "/plan", { plan: plan.value, days: days.value })
+                        .then(function () { say("Plan updated.", "ok"); customerDetail(id); })
+                        .catch(function (e) { say(e.message, "err"); });
+                });
+                actions.appendChild(plan); actions.appendChild(days); actions.appendChild(el("span", "days")); actions.appendChild(apply);
+            }
+            parts.push(actions);
+
+            parts.push(el("h3", "Users"));
+            parts.push(panel(table(["Name", "Email", "Role", "Approval", "Last sign-in", "Status", ""], d.users.map(function (u) {
+                var btn = null;
+                if (perms.suspend_accounts) {
+                    btn = el("button", u.active ? "Disable" : "Enable", u.active ? "btn danger" : "btn primary");
+                    btn.addEventListener("click", function () {
+                        api("/api/internal/customers/" + id + "/users/" + u.id + "/active", { active: !u.active })
+                            .then(function () { customerDetail(id); }).catch(function (e) { say(e.message, "err"); });
+                    });
+                }
+                var name = el("span", null, "who-cell"); name.appendChild(avatar(u.name)); name.appendChild(document.createTextNode(u.name));
+                return [name, u.email, u.role, u.approval, when(u.last_login), u.active ? badge("Active", "green") : badge("Disabled", "red"), btn];
+            }))));
+            parts.push(el("h3", "Devices"));
+            parts.push(panel(table(["Name", "System", "IP address", "Last seen", "Status"], d.devices.map(function (v) {
+                return [v.name, v.os, v.ip, when(v.last_seen), v.online ? badge("Online", "green") : badge("Offline")];
+            }))));
+            parts.push(el("h3", "Recent incidents"));
+            parts.push(panel(table(["ID", "Type", "Device", "Severity", "Status", "Time"], d.incidents.map(function (i) {
+                return [i.event_id, i.event_type, i.device, badge(i.severity, /High|Critical/.test(i.severity) ? "red" : ""), i.status, when(i.timestamp)];
+            }))));
+            parts.push(el("h3", "Payments"));
+            parts.push(panel(table(["Date", "Method", "Plan", "Amount"], d.payments.map(function (p) {
+                return [when(p.at), p.method, p.plan, money(p.amount, p.currency)];
+            }))));
+            parts.push(el("h3", "Recent activity"));
+            parts.push(panel(table(["Time", "Who", "Action", "Detail"], d.activity.map(function (a) { return [when(a.ts), a.name, a.action, a.detail]; }))));
+            show(parts);
+            window.scrollTo(0, 0);
+        }).catch(function (e) { say(e.message, "err"); });
+    }
+
+    /* ------------------------------------------------ Employees and audit log */
+    function employees() {
+        return api("/api/internal/employees").then(function (list) {
+            show([heading("Employees and permissions", "Only Super Admins can change a level. There must always be one active Super Admin."),
+                  panel(table(["Name", "Email", "Level", "Active", "Last sign-in", ""], list.map(function (u) {
+                var select = el("select"); select.setAttribute("aria-label", "Level for " + u.name);
+                ["staff", "super_admin"].forEach(function (lv) {
+                    var o = el("option", lv === "staff" ? "Staff" : "Super Admin"); o.value = lv;
+                    if (lv === u.staff_level) { o.selected = true; }
+                    select.appendChild(o);
+                });
+                var save = el("button", "Save", "btn primary");
+                save.addEventListener("click", function () {
+                    api("/api/internal/employees/" + u.id + "/level", { level: select.value })
+                        .then(function () { say(u.email + " is now " + (select.value === "staff" ? "Staff" : "Super Admin") + ".", "ok"); })
+                        .catch(function (e) { say(e.message, "err"); });
+                });
+                var name = el("span", null, "who-cell"); name.appendChild(avatar(u.name)); name.appendChild(document.createTextNode(u.name));
+                return [name, u.email, select, u.active ? badge("Active", "green") : badge("Disabled", "red"), when(u.last_login), save];
+            })))]);
+        });
+    }
+    function audit() {
+        return api("/api/internal/audit").then(function (list) {
+            var limited = perms.view_audit_logs === "limited";
+            show([heading(limited ? "My activity" : "Audit log", limited ? "Staff see their own actions. Super Admins see everyone's." : "Every important action on the platform, newest first."),
+                  panel(table(["Time", "Who", "Company", "Action", "Detail", "IP address"], list.map(function (a) {
+                return [when(a.ts), a.name ? a.name + " (" + a.email + ")" : "-", a.company, a.action.replace(/_/g, " "), a.detail, a.ip];
+            })))]);
+        });
+    }
+
+    /* ------------------------------------------------ Payments: one independent switch per service */
+    function payments() {
+        return api("/api/internal/payments").then(function (d) {
+            var grid = el("div", null, "pay-grid");
+            d.services.forEach(function (s) {
+                var card = el("div", null, "panel pay-card" + (s.enabled ? "" : " off"));
+                var top = el("div", null, "pay-top"), title = el("div");
+                title.appendChild(el("h4", s.name));
+                title.appendChild(el("p", s.key === "paypal" ? "Card and PayPal payments, charged in US dollars." : "Card and PayShap payments, charged in rand.", "note"));
+                top.appendChild(title);
+                top.appendChild(badge(s.enabled ? "ON" : "OFF", s.enabled ? "green" : "red"));
+                card.appendChild(top);
+                card.appendChild(el("p", s.enabled
+                    ? "Customers can start a " + s.name + " payment."
+                    : "Customers cannot start a " + s.name + " payment. The other service is not affected.", "pay-state"));
+                var want = !s.enabled;
+                var btn = el("button", s.enabled ? "Switch off " + s.name : "Switch on " + s.name, s.enabled ? "btn danger" : "btn primary");
+                btn.addEventListener("click", function () {
+                    if (!want && !window.confirm("Switch off " + s.name + "? Customers will not be able to pay with it until you switch it on again.")) { return; }
+                    btn.disabled = true;
+                    api("/api/internal/payments/" + s.key, { enabled: want }).then(function () {
+                        say(s.name + " is now " + (want ? "ON" : "OFF") + ".", "ok");
+                        return payments();
+                    }).catch(function (e) { say(e.message, "err"); btn.disabled = false; });
+                });
+                card.appendChild(btn);
+                grid.appendChild(card);
+            });
+            show([heading("Payments", "Each payment service has its own switch. Switching one off never affects the other. Every change is saved in the audit log."), grid]);
+        });
+    }
+
+    /* ------------------------------------------------ Help messages from customers */
+    function helpMessages() {
+        return api("/api/internal/support").then(function (list) {
+            var waiting = list.filter(function (m) { return m.status === "open"; }).length;
+            var box = el("div", null, "help-list");
+            if (!list.length) { box.appendChild(panel(el("p", "No messages yet. When a customer gets stuck and writes to you, it appears here.", "note"))); }
+            list.forEach(function (m) {
+                var card = el("div", null, "panel help-card" + (m.status === "done" ? " done" : ""));
+                var top = el("div", null, "help-top"), left = el("div");
+                left.appendChild(el("h4", m.company + " – " + m.topic));
+                left.appendChild(el("p", m.person + " (" + m.email + ") · " + when(m.created_at), "note"));
+                top.appendChild(left);
+                top.appendChild(badge(m.status === "open" ? "WAITING" : "ANSWERED", m.status === "open" ? "red" : "green"));
+                card.appendChild(top);
+                card.appendChild(el("p", m.message, "help-msg"));
+                var actions = el("div", null, "help-actions");
+                var reply = el("a", "Reply by email", "btn primary");
+                reply.href = "mailto:" + encodeURIComponent(m.email).replace("%40", "@") + "?subject=" + encodeURIComponent("Re: " + m.topic);
+                actions.appendChild(reply);
+                var toggle = el("button", m.status === "open" ? "Mark as answered" : "Reopen", "btn");
+                toggle.addEventListener("click", function () {
+                    toggle.disabled = true;
+                    api("/api/internal/support/" + m.id, { status: m.status === "open" ? "done" : "open" })
+                        .then(function () { return helpMessages(); })
+                        .catch(function (e) { say(e.message, "err"); toggle.disabled = false; });
+                });
+                actions.appendChild(toggle);
+                card.appendChild(actions);
+                box.appendChild(card);
+            });
+            show([heading("Help messages", waiting + " waiting for a reply. Customers write here when they get stuck, for example when connecting a laptop. You also get each one by email.", null), box]);
+        });
+    }
+
+    var TABS = [
+        { key: "monitor_platform", label: "Command Centre", icon: "centre", run: function () { commandCentre(); return Promise.resolve(); } },
+        { key: "view_customers", label: "Customers", icon: "customers", run: customers },
+        { key: "manage_employees", label: "Employees and permissions", icon: "staff", run: employees, full: true },
+        { key: "manage_payments", label: "Payments", icon: "payments", run: payments },
+        { key: "manage_support", label: "Help messages", icon: "help", run: helpMessages },
+        { key: "view_audit_logs", label: "Audit log", icon: "audit", run: audit }
+    ];
+
+    function start() {
+        var nav = document.getElementById("tabs"), first = true;
+        TABS.forEach(function (tab) {
+            var level = perms[tab.key];
+            if (!level || (tab.full && level !== true)) { return; }
+            var b = el("button"), icon = svg("svg", { viewBox: "0 0 24 24", "aria-hidden": "true" });
+            icon.innerHTML = ICONS[tab.icon];
+            b.appendChild(icon);
+            b.appendChild(document.createTextNode(tab.key === "view_audit_logs" && level === "limited" ? "My activity" : tab.label));
+            b.addEventListener("click", function () {
+                Array.prototype.forEach.call(nav.children, function (x) { x.className = ""; });
+                b.className = "on";
+                stopTimer(); say("");
+                tab.run().catch(function (e) { say(e.message, "err"); });
+            });
+            nav.appendChild(b);
+            if (first) { first = false; b.click(); }
+        });
+    }
+
+    api("/api/auth/me").then(function (d) {
+        me = d.user; csrf = d.csrf;
+        document.getElementById("who-name").textContent = me.name;
+        document.getElementById("who-level").textContent = me.staff_level === "super_admin" ? "Super Admin" : "Staff";
+        document.getElementById("who-avatar").textContent = (me.name || "?").trim().charAt(0).toUpperCase();
+        return api("/api/internal/permissions");
+    }).then(function (p) {
+        perms = p.permissions;
+        start();
+    }).catch(function () {
+        window.location.href = "/login.html";
+    });
+
+    document.getElementById("logout").addEventListener("click", function () {
+        api("/api/auth/logout", {}).then(function () { window.location.href = "/login.html"; });
+    });
+})();
+</script>
+</body>
+</html>

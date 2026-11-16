@@ -1,0 +1,339 @@
+"""Payfast payments for MellowTech.
+
+Uses Payfast hosted checkout and ITN verification.
+The amount always comes from app.py's amount_due() (already converted to rand).
+"""
+
+import hashlib
+import os
+import urllib.parse
+import urllib.request
+from datetime import datetime, timedelta
+
+from flask import jsonify, request
+
+
+def _cfg():
+    live = os.environ.get("PAYFAST_MODE", "sandbox").strip().lower() == "live"
+
+    return {
+        "merchant_id": os.environ.get("PAYFAST_MERCHANT_ID", "").strip(),
+        "merchant_key": os.environ.get("PAYFAST_MERCHANT_KEY", "").strip(),
+        "passphrase": os.environ.get("PAYFAST_PASSPHRASE", "").strip(),
+        "process_url": (
+            "https://www.payfast.co.za/eng/process"
+            if live
+            else "https://sandbox.payfast.co.za/eng/process"
+        ),
+        "validate_host": (
+            "www.payfast.co.za"
+            if live
+            else "sandbox.payfast.co.za"
+        ),
+    }
+
+
+def ready():
+    c = _cfg()
+    return bool(c["merchant_id"] and c["merchant_key"])
+
+
+def _signature(fields, passphrase):
+    """Generate the Payfast MD5 signature."""
+
+    parts = []
+
+    for key, value in fields.items():
+        value = str(value).strip()
+        if value:
+            parts.append(f"{key}={urllib.parse.quote_plus(value)}")
+
+    text = "&".join(parts)
+
+    if passphrase:
+        text += "&passphrase=" + urllib.parse.quote_plus(passphrase)
+
+    return hashlib.md5(text.encode("utf-8")).hexdigest()
+
+
+def _calculate_amount(h, plan_key, plan, org_id):
+    """Use app.py's amount_due (already in rand). No silent fallback."""
+
+    amount_due = h.get("amount_due")
+
+    if not callable(amount_due):
+        raise ValueError("amount_due() was not supplied by app.py")
+
+    amount = float(amount_due(org_id, plan))      # app.py order is (org_id, plan)
+
+    print(
+        f"PAYFAST DEBUG: plan={plan_key} | amount_zar={amount:.2f}",
+        flush=True
+    )
+
+    return amount
+
+
+def init_payfast(app, h):
+    """Initialize Payfast routes and payment handling."""
+
+    get_db = h["get_db"]
+    error = h["error"]
+    iso = h["iso"]
+    utcnow = h["utcnow"]
+
+    login_required = h["login_required"]
+    audit = h["audit"]
+    too_many = h["too_many"]
+
+    base_url = h["base_url"]
+    PLANS = h["plans"]
+
+    current_user_id = h["current_user_id"]
+    current_org_id = h["current_org_id"]
+    payments_enabled = h.get("payments_enabled", lambda: True)
+
+    # ---------------------------------------------------------
+    # PayFast readiness
+    # ---------------------------------------------------------
+
+    @app.get("/api/payfast/ready")
+    @login_required()
+    def payfast_ready():
+        return jsonify({"ready": ready()})
+
+    # ---------------------------------------------------------
+    # Create PayFast order
+    # ---------------------------------------------------------
+
+    @app.post("/api/payfast/create-order")
+    @login_required("admin")
+    def payfast_create_order():
+
+        if not ready():
+            return error("Payfast is not connected yet.", 503)
+
+        if not payments_enabled():
+            return error("Payments are switched off right now. Please try again later.", 503)
+
+        data = request.get_json(silent=True) or {}
+
+        plan_key = data.get("plan")
+        plan = PLANS.get(plan_key)
+
+        if not plan:
+            return error("Unknown plan.", 400)
+
+        if too_many("payfast:" + str(current_user_id()), 10, 600):
+            return error("Too many attempts. Wait a few minutes.", 429)
+
+        try:
+            total_amount = _calculate_amount(h, plan_key, plan, current_org_id())
+        except Exception as exc:
+            print(f"PAYFAST ERROR: Could not calculate amount: {exc}", flush=True)
+            return error(
+                "Unable to calculate the payment amount. "
+                "Please check the plan pricing.",
+                500
+            )
+
+        if total_amount <= 0:
+            print(f"PAYFAST ERROR: Invalid amount: {total_amount}", flush=True)
+            return error("Invalid payment amount.", 400)
+
+        db = get_db()
+
+        cursor = db.execute(
+            """
+            INSERT INTO payfast_payments
+            (org_id, user_id, plan, amount, status, created_at)
+            VALUES (?, ?, ?, ?, 'created', ?)
+            """,
+            (
+                current_org_id(),
+                current_user_id(),
+                plan_key,
+                f"{total_amount:.2f}",
+                iso(utcnow()),
+            ),
+        )
+
+        db.commit()
+
+        payment_id = cursor.lastrowid
+
+        c = _cfg()
+
+        fields = {
+            "merchant_id": c["merchant_id"],
+            "merchant_key": c["merchant_key"],
+            "return_url": f"{base_url}/index.html?paid=1",
+            "cancel_url": f"{base_url}/index.html?paid=0",
+            "notify_url": f"{base_url}/api/payfast/notify",
+            "m_payment_id": str(payment_id),
+            "amount": f"{total_amount:.2f}",
+            "item_name": (
+                f"MellowTech "
+                f"{plan.get('name', plan_key)} "
+                f"({plan.get('days', 30)} days)"
+            )[:100],
+        }
+
+        fields["signature"] = _signature(fields, c["passphrase"])
+
+        print(
+            f"PAYFAST DEBUG: payment_id={payment_id}, "
+            f"amount_sent={fields['amount']}, plan={plan_key}",
+            flush=True
+        )
+
+        audit("payfast_order_created", f"{plan_key} {total_amount:.2f}")
+
+        return jsonify({
+            "process_url": c["process_url"],
+            "fields": fields
+        })
+
+    # ---------------------------------------------------------
+    # PayFast ITN
+    # ---------------------------------------------------------
+
+    @app.post("/api/payfast/notify")
+    def payfast_notify():
+        """Payfast server-to-server callback. Verified before activating a plan."""
+
+        form = request.form.to_dict()
+
+        signature = form.pop("signature", "")
+
+        c = _cfg()
+
+        expected_signature = _signature(form, c["passphrase"])
+
+        if expected_signature != signature:
+            print("Payfast ITN rejected: invalid signature", flush=True)
+            return "invalid signature", 400
+
+        try:
+            body = urllib.parse.urlencode(form).encode()
+
+            req = urllib.request.Request(
+                f"https://{c['validate_host']}/eng/query/validate",
+                data=body,
+                headers={"Content-Type": "application/x-www-form-urlencoded"},
+            )
+
+            with urllib.request.urlopen(req, timeout=15) as response:
+                validation_result = response.read().decode().strip()
+
+                if validation_result != "VALID":
+                    print(
+                        f"Payfast ITN validation returned: {validation_result}",
+                        flush=True
+                    )
+                    return "not valid", 400
+
+        except Exception as exc:
+            print(f"Payfast ITN validation failed: {exc}", flush=True)
+            return "validation error", 502
+
+        if form.get("payment_status") != "COMPLETE":
+            return "ignored", 200
+
+        db = get_db()
+
+        payment_id = form.get("m_payment_id")
+
+        row = db.execute(
+            "SELECT * FROM payfast_payments WHERE id = ?",
+            (payment_id,),
+        ).fetchone()
+
+        if not row:
+            print(f"Payfast ITN: payment {payment_id} was not found.", flush=True)
+            return "payment not found", 404
+
+        if row["status"] == "completed":
+            return "ok", 200
+
+        try:
+            stored_amount = float(row["amount"])
+            received_amount = float(form.get("amount_gross", "0"))
+        except (TypeError, ValueError):
+            db.execute(
+                "UPDATE payfast_payments SET status = 'mismatch' WHERE id = ?",
+                (row["id"],),
+            )
+            db.commit()
+            print(f"Payfast amount could not be read for payment {row['id']}", flush=True)
+            return "amount mismatch", 400
+
+        if abs(stored_amount - received_amount) > 0.01:
+            db.execute(
+                "UPDATE payfast_payments SET status = 'mismatch' WHERE id = ?",
+                (row["id"],),
+            )
+            db.commit()
+            print(
+                f"Payfast amount mismatch on payment {row['id']}: "
+                f"expected {stored_amount:.2f}, received {received_amount:.2f}",
+                flush=True
+            )
+            return "amount mismatch", 400
+
+        plan = PLANS.get(row["plan"])
+
+        if not plan:
+            print(f"Payfast ITN: unknown plan {row['plan']}", flush=True)
+            return "unknown plan", 400
+
+        org = db.execute(
+            "SELECT plan_expires FROM organisations WHERE id = ?",
+            (row["org_id"],),
+        ).fetchone()
+
+        if not org:
+            print(f"Payfast ITN: organisation {row['org_id']} not found.", flush=True)
+            return "organisation not found", 404
+
+        start = utcnow()
+
+        if org["plan_expires"] and org["plan_expires"] > iso(start):
+            start = datetime_fromiso(org["plan_expires"])
+
+        try:
+            plan_days = int(plan.get("days", 30))
+        except (TypeError, ValueError):
+            plan_days = 30
+
+        expires = iso(start + timedelta(days=plan_days))
+
+        db.execute(
+            "UPDATE organisations SET plan = ?, plan_expires = ? WHERE id = ?",
+            (row["plan"], expires, row["org_id"]),
+        )
+
+        db.execute(
+            "UPDATE payfast_payments SET status = 'completed', paid_at = ? WHERE id = ?",
+            (iso(utcnow()), row["id"]),
+        )
+
+        db.commit()
+
+        audit(
+            "payfast_payment_completed",
+            f"{row['plan']} {stored_amount:.2f}",
+            row["user_id"],
+        )
+
+        print(
+            "Payfast payment completed successfully: "
+            f"payment={row['id']} plan={row['plan']} amount={stored_amount:.2f}",
+            flush=True
+        )
+
+        return "ok", 200
+
+
+def datetime_fromiso(value):
+    return datetime.fromisoformat(value)

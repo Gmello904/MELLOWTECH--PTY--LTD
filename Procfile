@@ -1,0 +1,1 @@
+web: sh -c 'if [ ! -f /var/app/data/.seeded ]; then rm -f /var/app/data/mellowtech.db-wal /var/app/data/mellowtech.db-shm; cp backend/mellowtech.db /var/app/data/mellowtech.db && touch /var/app/data/.seeded; fi; exec gunicorn --chdir backend app:app'

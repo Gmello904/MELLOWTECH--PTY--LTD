@@ -1,0 +1,1 @@
+web: bash -c 'mkdir -p /var/app/mellowtech-data && if [ ! -f /var/app/mellowtech-data/mellowtech-local.db ]; then cp /var/app/current/backend/mellowtech.db /var/app/mellowtech-data/mellowtech-local.db; fi; exec gunicorn --bind 0.0.0.0:8000 --workers 1 --timeout 120 application:application'

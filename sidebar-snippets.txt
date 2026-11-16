@@ -1,0 +1,148 @@
+﻿===== SIDEBAR (lines 501-600) =====
+    </svg>
+
+    <!-- ========== SIDEBAR ========== -->
+    <aside class="sidebar">
+        <div class="brand">
+            <div class="brand-logo">
+            <svg viewBox="0 0 240 150" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Mellow Secure">
+                <defs>
+                    <marker id="ms-arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+                        <path d="M0 0 L10 5 L0 10 Z" fill="#38bdf8"/>
+                    </marker>
+                </defs>
+                <g>
+                    <path d="M61.7 53.8 A62 62 0 0 1 167.5 35.1" fill="none" stroke="#38bdf8" stroke-width="3.5" stroke-linecap="round" marker-end="url(#ms-arrow)"/>
+                    <path d="M178.3 96.2 A62 62 0 0 1 72.5 114.9" fill="none" stroke="#38bdf8" stroke-width="3.5" stroke-linecap="round" marker-end="url(#ms-arrow)"/>
+                </g>
+                <text x="120" y="70" text-anchor="middle" font-family="'Kaushan Script', cursive" font-size="30" fill="#fff">Mellow</text>
+                <text x="120" y="102" text-anchor="middle" font-family="'Anton', 'Impact', sans-serif" font-size="34" fill="#fff" letter-spacing="1">SECURE</text>
+            </svg>
+        </div>
+            <div class="logo-subtitle">CYBERSECURITY PLATFORM</div>
+        </div>
+
+        <nav aria-label="Main navigation">
+            <button type="button" class="nav-button active" data-page="dashboard" aria-current="page">
+                <svg class="icon" aria-hidden="true"><use href="#i-dashboard"/></svg>Dashboard
+            </button>
+            <button type="button" class="nav-button" data-page="devices">
+                <svg class="icon" aria-hidden="true"><use href="#i-laptop"/></svg>Devices
+            </button>
+            <button type="button" class="nav-button" data-page="network">
+                <svg class="icon" aria-hidden="true"><use href="#i-network"/></svg>Network Monitoring
+            </button>
+            <button type="button" class="nav-button" data-page="threats">
+                <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Threat Detection
+            </button>
+            <button type="button" class="nav-button" data-page="severity">
+                <svg class="icon" aria-hidden="true"><use href="#i-bars"/></svg>Threat Severity
+            </button>
+            <button type="button" class="nav-button" data-page="events">
+                <svg class="icon" aria-hidden="true"><use href="#i-list"/></svg>Security Events
+            </button>
+            <button type="button" class="nav-button" data-page="scanner">
+                <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Vulnerability Scanner
+            </button>
+            <button type="button" class="nav-button" data-page="billing">
+                <svg class="icon" aria-hidden="true"><use href="#i-card"/></svg>Billing &amp; Plans
+            </button>
+            <button type="button" class="nav-button" data-page="docscan">
+                <svg class="icon" aria-hidden="true"><use href="#i-list"/></svg>Document Scanner
+            </button>
+            <button type="button" class="nav-button" data-page="svc-ai_security">
+                <svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>AI Security
+            </button>
+            <button type="button" class="nav-button" data-page="svc-incident_response">
+                <svg class="icon" aria-hidden="true"><use href="#i-alert"/></svg>Incident Response
+            </button>
+            <button type="button" class="nav-button" data-page="svc-cloud_security">
+                <svg class="icon" aria-hidden="true"><use href="#i-network"/></svg>Cloud Security
+            </button>
+            <button type="button" class="nav-button" data-page="svc-soc_monitoring">
+                <svg class="icon" aria-hidden="true"><use href="#i-bars"/></svg>Security Monitoring
+            </button>
+            <button type="button" class="nav-button" data-page="svc-grc_compliance">
+                <svg class="icon" aria-hidden="true"><use href="#i-building"/></svg>Compliance and Risk
+            </button>
+            <button type="button" class="nav-button" data-page="svc-requests" data-platform-admin hidden>
+                <svg class="icon" aria-hidden="true"><use href="#i-users"/></svg>Service requests
+            </button>
+            <button type="button" class="nav-button" data-page="autopilot">
+                <svg class="icon" aria-hidden="true"><use href="#i-refresh"/></svg>Autopilot
+            </button>
+            <button type="button" class="nav-button" data-page="assistant">
+                <svg class="icon" aria-hidden="true"><use href="#i-shield"/></svg>Ask Mellow
+            </button>
+            <button type="button" class="nav-button" data-page="settings">
+                <svg class="icon" aria-hidden="true"><use href="#i-lock"/></svg>Settings
+            </button>
+            <button type="button" class="nav-button" data-page="company">
+                <svg class="icon" aria-hidden="true"><use href="#i-building"/></svg>Company
+            </button>
+            <button type="button" class="nav-button" data-page="requests" data-platform-admin hidden>
+                <svg class="icon" aria-hidden="true"><use href="#i-users"/></svg>Account requests
+                <span id="request-badge" class="nav-badge" hidden>0</span>
+            </button>
+        </nav>
+
+        <div class="sidebar-bottom">
+            <p>MellowTech Security</p>
+            <span class="online" id="sidebar-status" role="status">â— CONNECTING</span>
+            <p id="app-version" style="margin-top:10px"></p>
+        </div>
+    </aside>
+
+    <!-- ========== MAIN CONTENT ========== -->
+    <main class="main-content" id="main">
+
+        <header class="topbar">
+            <div>
+                <h1>MellowTech</h1>
+===== PAGE SECTION (lines 734-753) =====
+
+        <!-- ========== NETWORK MONITORING ========== -->
+        <section id="network" class="page" hidden>
+            <h2>Network Monitoring</h2>
+            <p class="page-description">Monitor local network interfaces and network telemetry.</p>
+
+            <div id="network-details" class="panel">
+                <div class="panel-header">
+                    <div>
+                        <h3>Local Network Interfaces</h3>
+                        <p>Live network telemetry from the local computer.</p>
+                    </div>
+                    <span class="live-indicator">LIVE</span>
+                </div>
+                <p>Connecting to the MellowTech backend...</p>
+            </div>
+
+            <div class="stats-grid">
+                <div class="stat-card"><span>MONITORING</span><strong class="success-text">ACTIVE</strong></div>
+                <div class="stat-card"><span>NETWORK STATUS</span><strong class="success-text">NORMAL</strong></div>
+===== LOCK_CARD_PAGES (lines 3199-3210) =====
+(function () {
+    var CLOSED = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></svg>';
+    var OPEN = '<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 7.5-2"/></svg>';
+    var FEATURE_PAGES = { docscan: "document_scan", autopilot: "autopilot", assistant: "assistant", scanner: "page_scanner", threats: "page_threats", network: "page_network" };
+    var LOCK_CARD_PAGES = { scanner: "Vulnerability Scanner", threats: "Threat Detection", network: "Network Monitoring" };
+    var plans = {};
+    function get(url) { return fetch(url, { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).catch(function () { return null; }); }
+    function cap(s) { return s ? s.charAt(0).toUpperCase() + s.slice(1) : ""; }
+
+    function pill(page, needs) {
+        var h = document.querySelector("#" + page + " h2");
+        if (!h) { return; }
+===== LOCKED_NAV (lines 3396-3407) =====
+      .catch(function () { window.location.href = "/login.html"; });
+  };
+
+  var LOCKED_NAV = /network monitoring|threat detection|vulnerability scanner|billing/i;
+  document.addEventListener("click", function (e) {
+    if (!guest || !e.target.closest) { return; }
+    var signIn = e.target.closest("[data-mt-signin]");
+    if (signIn) { e.preventDefault(); e.stopImmediatePropagation(); window.location.href = "/login.html"; return; }
+    var item = e.target.closest("button, a, .nav-button");
+    if (!item || item.closest("#mt-gate") || item.closest("#mt-bar")) { return; }
+    var text = (item.textContent || "").replace(/\s+/g, " ").trim();
+    var isNav = item.classList.contains("nav-button");

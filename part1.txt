@@ -1,0 +1,90 @@
+        return False
+
+
+# ---------------------------------------------------------------- sessions and guards
+def current_user():
+    uid = session.get("uid")
+    if not uid:
+        return None
+    user = get_db().execute("SELECT u.id,u.email,u.name,u.role,u.active,u.approval,u.session_version,u.org_id,o.name AS org_name,o.is_platform,u.staff_level,o.suspended "
+                            "FROM users u JOIN organisations o ON o.id = u.org_id WHERE u.id = ?", (uid,)).fetchone()
+    if not user or not user["active"] or user["approval"] != "approved" or user["session_version"] != session.get("sv"):
+        session.clear()
+        return None
+    if user["suspended"] and not user["is_platform"]:    # a suspended customer company is signed out at once
+        session.clear()
+        return None
+    idle_seconds = None
+    if not user["is_platform"]:
+        rules = get_org_settings(user["org_id"])
+        allowed = allowed_ip_list(rules)
+        if allowed and request.remote_addr not in allowed:       # the company only allows sign-in from listed addresses
+            session.clear()
+            return None
+        idle_seconds = rules["idle_minutes"] * 60 if rules["idle_minutes"] else None
+    if not account.session_ok(user["id"], idle_seconds):          # signed out from the Settings page, or idle for too long
+        session.clear()
+        return None
+    return user
+
+
+def login_required(role=None):
+    def decorator(view):
+        @wraps(view)
+        def wrapper(*args, **kwargs):
+            user = current_user()
+            if not user:
+                return error("Sign in required.", 401)
+            if role == "platform_admin":        # MellowTech administrators only (approving accounts)
+                if not (user["is_platform"] and user["role"] == "admin" and user["staff_level"] in STAFF_LEVELS):
+                    return error("Only MellowTech administrators can do that.", 403)
+            elif role == "platform":              # MellowTech staff only (server and network details)
+                if not (user["is_platform"] and user["staff_level"] in STAFF_LEVELS):
+                    return error("This is only available to MellowTech staff.", 403)
+            elif role and user["role"] != role:
+                return error("You do not have permission to do that.", 403)
+            g.user = user
+            return view(*args, **kwargs)
+        return wrapper
+    return decorator
+
+
+@app.before_request
+def api_guard():
+    if request.path.startswith("/api/") and request.method in ("POST", "PUT", "PATCH", "DELETE"):
+        if request.path != "/api/documents/scan" and (request.content_length or 0) > 16 * 1024:
+            return error("That request is too large.", 413)
+        if request.path == "/api/payfast/notify":
+            return   # Payfast posts this as a form, not JSON, and signs it its own way
+        if not request.is_json:
+            return error("Send JSON.", 415)
+        if request.path not in ("/api/auth/login", "/api/auth/forgot", "/api/auth/reset",
+                                "/api/auth/register", "/api/auth/verify") and not request.path.startswith("/api/agent/"):
+            token = request.headers.get("X-CSRF-Token", "")
+            if not session.get("csrf") or not secrets.compare_digest(token, session["csrf"]):
+                return error("Security token missing or invalid. Reload the page.", 403)
+
+
+@app.after_request
+def security_headers(response):
+    response.headers.update({
+        "X-Content-Type-Options": "nosniff", "X-Frame-Options": "DENY",
+        "Referrer-Policy": "same-origin", "Permissions-Policy": "camera=(), microphone=(), geolocation=()"})
+    if request.path.startswith("/api/"):
+        response.headers["Cache-Control"] = "no-store"
+    if BASE_URL.startswith("https://"):
+        response.headers["Strict-Transport-Security"] = "max-age=31536000"
+    return response
+
+
+# ---------------------------------------------------------------- web pages (same origin as the API)
+@app.get("/")
+def home():
+    return redirect("/index.html" if current_user() else "/login.html")
+
+
+@app.get("/<path:name>")
+def pages(name):
+    if name == "internal.html":                 # MellowTech employees only; everyone else sees "Not found"
+        user = current_user()
+        if not user:
